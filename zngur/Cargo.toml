@@ -8,5 +8,8 @@ license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+hotreload = ["zngur-generator/hotreload"]
+
 [dependencies]
 zngur-generator = { version = "=0.4.0", path = "../zngur-generator" }

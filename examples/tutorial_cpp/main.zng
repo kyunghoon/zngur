@@ -1,5 +1,5 @@
 #cpp_additional_includes "
-    #include <inventory.h>
+#include <inventory.h>
 "
 
 type () {
