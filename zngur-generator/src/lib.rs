@@ -24,6 +24,12 @@ pub use zngur_def::*;
 
 pub struct ZngurGenerator(ZngurFile);
 
+#[cfg(feature="hotreload")]
+pub enum Signature {
+    Function(String, String),
+    WellKnown(String, String),
+}
+
 impl ZngurGenerator {
     pub fn build_from_zng(zng: ZngurFile) -> Self {
         ZngurGenerator(zng)
@@ -109,7 +115,7 @@ impl ZngurGenerator {
             }
             for wellknown_trait in ty_def.wellknown_traits {
                 let data = rust_file.add_wellknown_trait(&ty_def.ty, wellknown_trait);
-                wellknown_traits.push(data);
+                wellknown_traits.push(data.clone());
             }
             for method_details in ty_def.methods {
                 let ZngurMethodDetails {
@@ -241,6 +247,10 @@ impl ZngurGenerator {
                     .collect(),
             });
         }
+
+        #[cfg(feature="hotreload")]
+        rust_file.add_hotload_api(&cpp_file);
+
         let (h, cpp) = cpp_file.render();
         (rust_file.text, h, cpp)
     }

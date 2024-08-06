@@ -3,7 +3,7 @@ use std::fmt::Write;
 use itertools::Itertools;
 
 use crate::{
-    cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType},
+    cpp::{CppFile, CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType},
     ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData,
 };
 
@@ -133,42 +133,37 @@ impl IntoCpp for RustType {
 }
 
 pub struct RustFile {
+    pub hotreload: bool,
     pub text: String,
     pub panic_to_exception: bool,
 }
 
 impl Default for RustFile {
     fn default() -> Self {
+        #[cfg(feature="hotreload")]
+        let hotreload = true;
+        #[cfg(not(feature="hotreload"))]
+        let hotreload = false;
+
         Self {
+            hotreload,
             text: r#"
 #[allow(dead_code)]
 mod zngur_types {
     pub struct ZngurCppOpaqueBorrowedObject(());
-
     #[repr(C)]
     pub struct ZngurCppOpaqueOwnedObject {
         data: *mut u8,
         destructor: extern "C" fn(*mut u8),
     }
-
     impl ZngurCppOpaqueOwnedObject {
         pub unsafe fn new(
             data: *mut u8,
             destructor: extern "C" fn(*mut u8),            
-        ) -> Self {
-            Self { data, destructor }
-        }
-
-        pub fn ptr(&self) -> *mut u8 {
-            self.data
-        }
+        ) -> Self { Self { data, destructor } }
+        pub fn ptr(&self) -> *mut u8 { self.data }
     }
-
-    impl Drop for ZngurCppOpaqueOwnedObject {
-        fn drop(&mut self) {
-            (self.destructor)(self.data)
-        }
-    }
+    impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { (self.destructor)(self.data) } }
 }
 
 #[allow(unused_imports)]
@@ -235,12 +230,22 @@ pub struct ConstructorMangledNames {
 }
 
 impl RustFile {
-    fn call_cpp_function(&mut self, name: &str, inputs: usize) {
+    fn call_cpp_function(&mut self, name: &str, first_input: Option<&str>, inputs: usize) {
         for n in 0..inputs {
             wln!(self, "let mut i{n} = ::core::mem::MaybeUninit::new(i{n});")
         }
         wln!(self, "let mut r = ::core::mem::MaybeUninit::uninit();");
+        if self.hotreload {
+            w!(self, "(GetZngurCApi().");
+        }
         w!(self, "{name}");
+        if self.hotreload {
+            w!(self, ")");
+        }
+        w!(self, "(");
+        if let Some(i) = first_input {
+            w!(self, "{i}, ");
+        }
         for n in 0..inputs {
             w!(self, "i{n}.as_mut_ptr() as *mut u8, ");
         }
@@ -330,9 +335,7 @@ pub extern "C" fn {mangled_name}(
     destructor: extern "C" fn(*mut u8),
     o: *mut u8,
 ) {{
-    struct Wrapper {{ 
-        value: ZngurCppOpaqueOwnedObject,
-    }}
+    struct Wrapper {{ value: ZngurCppOpaqueOwnedObject }}
     impl {trait_without_assocs} for Wrapper {{
 "#
         );
@@ -354,7 +357,7 @@ pub extern "C" fn {mangled_name}(
             }
             wln!(self, ") -> {} {{ unsafe {{", method.output);
             wln!(self, "            let data = self.value.ptr();");
-            self.call_cpp_function(&format!("{rust_link_name}(data, "), method.inputs.len());
+            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len());
             wln!(self, "        }} }}");
         }
         wln!(
@@ -362,9 +365,7 @@ pub extern "C" fn {mangled_name}(
             r#"
     }}
     unsafe {{ 
-        let this = Wrapper {{
-            value: ZngurCppOpaqueOwnedObject::new(data, destructor),
-        }};
+        let this = Wrapper {{ value: ZngurCppOpaqueOwnedObject::new(data, destructor) }};
         let r: Box<dyn {trait_name}> = Box::new(this);
         std::ptr::write(o as *mut _, r)
     }}
@@ -386,10 +387,7 @@ pub extern "C" fn {mangled_name}(
             r#"
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn {mangled_name}(
-    data: *mut u8,
-    o: *mut u8,
-) {{
+pub extern "C" fn {mangled_name}(data: *mut u8, o: *mut u8) {{
     struct Wrapper(ZngurCppOpaqueBorrowedObject);
     impl {trait_without_assocs} for Wrapper {{
 "#
@@ -415,7 +413,7 @@ pub extern "C" fn {mangled_name}(
                 self,
                 "            let data = ::std::mem::transmute::<_, *mut u8>(self);"
             );
-            self.call_cpp_function(&format!("{rust_link_name}(data, "), method.inputs.len());
+            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len());
             wln!(self, "        }} }}");
         }
         wln!(
@@ -445,17 +443,11 @@ pub extern "C" fn {mangled_name}(
             r#"
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn {mangled_name}(
-    data: *mut u8,
-    destructor: extern "C" fn(*mut u8),
-    call: extern "C" fn(data: *mut u8, {} o: *mut u8),
-    o: *mut u8,
-) {{
+pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
     let this = unsafe {{ ZngurCppOpaqueOwnedObject::new(data, destructor) }};
     let r: Box<dyn {trait_str}> = Box::new(move |{}| unsafe {{
         _ = &this;
-        let data = this.ptr();
-"#,
+        let data = this.ptr();"#,
             inputs
                 .iter()
                 .enumerate()
@@ -467,7 +459,7 @@ pub extern "C" fn {mangled_name}(
                 .map(|(n, ty)| format!("i{n}: {ty}"))
                 .join(", "),
         );
-        self.call_cpp_function("call(data, ", inputs.len());
+        self.call_cpp_function("call", Some("data"), inputs.len());
         wln!(
             self,
             r#"
@@ -533,9 +525,7 @@ pub extern "C" fn {constructor}("#
             r#"
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn {match_check}(i: *mut u8, o: *mut u8) {{ unsafe {{
-    *o = matches!(&*(i as *mut &_), {rust_name} {{ .. }}) as u8;
-}} }}"#
+pub extern "C" fn {match_check}(i: *mut u8, o: *mut u8) {{ unsafe {{ *o = matches!(&*(i as *mut &_), {rust_name} {{ .. }}) as u8; }} }}"#
         );
         ConstructorMangledNames {
             constructor,
@@ -603,7 +593,7 @@ pub extern "C" fn {match_check}(i: *mut u8, o: *mut u8) {{ unsafe {{
             if method.receiver != ZngurMethodReceiver::Static {
                 wln!(self, "let i0 = self;");
             }
-            self.call_cpp_function(&format!("{mn}("), method.inputs.len() + input_offset);
+            self.call_cpp_function(mn, None, method.inputs.len() + input_offset);
             wln!(self, "}} }}");
         }
         w!(self, r#"}}"#);
@@ -635,7 +625,7 @@ pub(crate) fn {rust_name}("#
             w!(self, "i{n}: {ty}, ");
         }
         wln!(self, ") -> {output} {{ unsafe {{");
-        self.call_cpp_function(&format!("{mangled_name}("), inputs.len());
+        self.call_cpp_function(&mangled_name, None, inputs.len());
         wln!(self, "}} }}");
         mangled_name
     }
@@ -647,9 +637,7 @@ pub(crate) fn {rust_name}("#
             r#"
 #[allow(non_snake_case)]
 #[no_mangle]
-pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{
-    unsafe {{ &mut (*(d as *mut {ty})).{field} }}
-}}"#
+pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{ unsafe {{ &mut (*(d as *mut {ty})).{field} }} }}"#
         );
         mangled_name
     }
@@ -662,6 +650,8 @@ pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {
         use_path: Option<Vec<String>>,
         deref: bool,
     ) -> String {
+        let mangle = if self.hotreload { "" } else { "#[no_mangle]\n" };
+        let public = if self.hotreload { "" } else { "pub " };
         let mut mangled_name = mangle_name(rust_name);
         if deref {
             mangled_name += "_deref_";
@@ -671,13 +661,16 @@ pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {
             self,
             r#"
 #[allow(non_snake_case)]
-#[no_mangle]
-pub extern "C" fn {mangled_name}("#
+{mangle}{public}extern "C" fn {mangled_name}"#
         );
+
+        let mut signature = "(".to_string();
         for n in 0..inputs.len() {
-            w!(self, "i{n}: *mut u8, ");
+            signature += &format!("i{n}: *mut u8, ");
         }
-        wln!(self, "o: *mut u8) {{ unsafe {{");
+        signature += "o: *mut u8)";
+
+        wln!(self, "{signature} {{ unsafe {{");
         self.wrap_in_catch_unwind(|this| {
             if let Some(use_path) = use_path {
                 if use_path.first().is_some_and(|x| x == "crate") {
@@ -699,6 +692,7 @@ pub extern "C" fn {mangled_name}("#
             wln!(this, "));");
         });
         wln!(self, " }} }}");
+
         mangled_name
     }
 
@@ -707,6 +701,8 @@ pub extern "C" fn {mangled_name}("#
         ty: &RustType,
         wellknown_trait: ZngurWellknownTrait,
     ) -> ZngurWellknownTraitData {
+        let mangle = if self.hotreload { "" } else { "#[no_mangle]\n" };
+        let public = if self.hotreload { "" } else { "pub " };
         match wellknown_trait {
             ZngurWellknownTrait::Unsized => ZngurWellknownTraitData::Unsized,
             ZngurWellknownTrait::Copy => ZngurWellknownTraitData::Copy,
@@ -716,10 +712,7 @@ pub extern "C" fn {mangled_name}("#
                     self,
                     r#"
 #[allow(non_snake_case)]
-#[no_mangle]
-pub extern "C" fn {drop_in_place}(v: *mut u8) {{ unsafe {{
-    ::std::ptr::drop_in_place(v as *mut {ty});
-}} }}"#
+{mangle}{public}extern "C" fn {drop_in_place}(v: *mut u8) {{ unsafe {{ ::std::ptr::drop_in_place(v as *mut {ty}); }} }}"#
                 );
                 ZngurWellknownTraitData::Drop { drop_in_place }
             }
@@ -730,19 +723,13 @@ pub extern "C" fn {drop_in_place}(v: *mut u8) {{ unsafe {{
                     self,
                     r#"
 #[allow(non_snake_case)]
-#[no_mangle]
-pub extern "C" fn {pretty_print}(v: *mut u8) {{
-    eprintln!("{{:#?}}", unsafe {{ &*(v as *mut {ty}) }});
-}}"#
+{mangle}{public}extern "C" fn {pretty_print}(v: *mut u8) {{ eprintln!("{{:#?}}", unsafe {{ &*(v as *mut {ty}) }}); }}"#
                 );
                 wln!(
                     self,
                     r#"
 #[allow(non_snake_case)]
-#[no_mangle]
-pub extern "C" fn {debug_print}(v: *mut u8) {{
-    eprintln!("{{:?}}", unsafe {{ &*(v as *mut {ty}) }});
-}}"#
+{mangle}{public}extern "C" fn {debug_print}(v: *mut u8) {{ eprintln!("{{:?}}", unsafe {{ &*(v as *mut {ty}) }}); }}"#
                 );
                 ZngurWellknownTraitData::Debug {
                     pretty_print,
@@ -771,11 +758,7 @@ pub extern "C" fn {debug_print}(v: *mut u8) {{
 
         #[allow(non_snake_case)]
         #[no_mangle]
-        pub fn __zngur_take_panic() {{
-            PANIC_PAYLOAD.with(|p| {{
-                p.take();
-            }})
-        }}
+        pub fn __zngur_take_panic() {{ PANIC_PAYLOAD.with(|p| {{ p.take(); }}) }}
         "#
         );
         self.panic_to_exception = true;
@@ -813,22 +796,15 @@ pub extern "C" fn {debug_print}(v: *mut u8) {{
                     r#"
                 #[allow(non_snake_case)]
                 #[no_mangle]
-                pub fn {size_fn}() -> usize {{
-                    ::std::mem::size_of::<{ty}>()
-                }}
+                pub fn {size_fn}() -> usize {{ ::std::mem::size_of::<{ty}>() }}
         
                 #[allow(non_snake_case)]
                 #[no_mangle]
-                pub fn {alloc_fn}() -> *mut u8 {{
-                    unsafe {{ ::std::alloc::alloc(::std::alloc::Layout::new::<{ty}>()) }}
-                }}
+                pub fn {alloc_fn}() -> *mut u8 {{ unsafe {{ ::std::alloc::alloc(::std::alloc::Layout::new::<{ty}>()) }} }}
 
                 #[allow(non_snake_case)]
                 #[no_mangle]
-                pub fn {free_fn}(p: *mut u8) {{
-                    unsafe {{ ::std::alloc::dealloc(p, ::std::alloc::Layout::new::<{ty}>()) }}
-                }}
-                "#
+                pub fn {free_fn}(p: *mut u8) {{ unsafe {{ ::std::alloc::dealloc(p, ::std::alloc::Layout::new::<{ty}>()) }} }}"#
                 );
                 CppLayoutPolicy::HeapAllocated {
                     size_fn,
@@ -838,5 +814,73 @@ pub extern "C" fn {debug_print}(v: *mut u8) {{
             }
             LayoutPolicy::OnlyByRef => CppLayoutPolicy::OnlyByRef,
         }
+    }
+
+    #[cfg(feature="hotreload")]
+    pub fn add_hotload_api(&mut self, cpp_file: &CppFile) {
+        use crate::cpp::EmitMode;
+
+        wln!(self, r#"
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct ZngurRsApi {{"#);
+
+        for f in &cpp_file.fn_defs {
+            f.sig.emit_link_decl(&mut EmitMode::Rust(self)).expect("failed to emit link decl");
+        }
+        for td in &cpp_file.type_defs {
+            td.emit_links(&mut EmitMode::Rust(self)).expect("failed to emit links");
+        }
+        for (_, td) in &cpp_file.trait_defs {
+            td.emit_links(&mut EmitMode::Rust(self)).expect("failed to emit links");
+        }
+
+        wln!(self, r#"
+}}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct ZngurCApi {{"#);
+        if cpp_file.exported_impls.is_empty() {
+            wln!(self, "    _unused: u32");
+        } else {
+            for imp in &cpp_file.exported_impls {
+                for (_, sig) in &imp.methods {
+                    w!(self, r#"    pub {}: extern "C" fn ("#, sig.rust_link_name);
+                    for n in 0..sig.inputs.len() {
+                        w!(self, "i{n}: *mut u8, ");
+                    }
+                    wln!(self, "o: *mut u8),");
+                }
+            }
+        }
+        wln!(
+            self, r#"}}
+static CAPI: std::sync::OnceLock<ZngurCApi> = std::sync::OnceLock::new();
+
+#[allow(dead_code)]
+#[allow(non_snake_case)]
+fn GetZngurCApi() -> &'static ZngurCApi {{ CAPI.get().expect("zngur capi not initialized") }}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn GetZngurRsApi(capi: ZngurCApi) -> ZngurRsApi {{
+    CAPI.get_or_init(|| capi);
+    ZngurRsApi {{"#);
+
+        for f in &cpp_file.fn_defs {
+            f.sig.emit_link_decl(&mut EmitMode::RustLinkNameOnly(self)).expect("failed to emit link decl name");
+        }
+        for td in &cpp_file.type_defs {
+            td.emit_links(&mut EmitMode::RustLinkNameOnly(self)).expect("failed to emit link names");
+        }
+        for (_, td) in &cpp_file.trait_defs {
+            td.emit_links(&mut EmitMode::RustLinkNameOnly(self)).expect("failed to emit link names");
+        }
+
+        wln!(self, r#"    }}
+}}"#
+        );
+    
     }
 }
