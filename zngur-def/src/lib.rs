@@ -8,10 +8,10 @@ pub enum Mutability {
     Not,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ZngurMethodReceiver {
     Static,
-    Ref(Mutability),
+    Ref(Mutability, Option<String>),
     Move,
 }
 
@@ -43,6 +43,7 @@ pub struct ZngurExternCppImpl {
     pub tr: Option<RustTrait>,
     pub ty: RustType,
     pub methods: Vec<ZngurMethod>,
+    pub lifetimes: Vec<String>,
 }
 
 pub struct ZngurConstructor {
@@ -92,6 +93,7 @@ pub struct ZngurType {
     pub constructors: Vec<ZngurConstructor>,
     pub cpp_value: Option<(String, String)>,
     pub cpp_ref: Option<String>,
+    pub rust_value: Option<(String, String)>,
 }
 
 pub struct ZngurTrait {
@@ -146,12 +148,13 @@ pub struct RustPathAndGenerics {
     pub path: Vec<String>,
     pub generics: Vec<RustType>,
     pub named_generics: Vec<(String, RustType)>,
+    pub lifetimes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RustType {
     Primitive(PrimitiveRustType),
-    Ref(Mutability, Box<RustType>),
+    Ref(Mutability, Box<RustType>, Option<String>),
     Raw(Mutability, Box<RustType>),
     Boxed(Box<RustType>),
     Slice(Box<RustType>),
@@ -170,6 +173,7 @@ impl Display for RustPathAndGenerics {
             path,
             generics,
             named_generics,
+            ..
         } = self;
         for p in path {
             if p != "crate" {
@@ -181,11 +185,9 @@ impl Display for RustPathAndGenerics {
             write!(
                 f,
                 "::<{}>",
-                generics
-                    .iter()
-                    .map(|x| format!("{x}"))
-                    .chain(named_generics.iter().map(|x| format!("{} = {}", x.0, x.1)))
-                    .join(", ")
+                generics.iter().map(|x| format!("{x}"))
+                .chain(named_generics.iter().map(|x| format!("{} = {}", x.0, x.1)))
+                .join(", ")
             )?;
         }
         Ok(())
@@ -225,8 +227,10 @@ impl Display for RustType {
                     write!(f, "ZngurCppOpaqueOwnedObject")
                 }
             },
-            RustType::Ref(Mutability::Not, ty) => write!(f, "&{ty}"),
-            RustType::Ref(Mutability::Mut, ty) => write!(f, "&mut {ty}"),
+            RustType::Ref(Mutability::Not, ty, None) => write!(f, "&{ty}"),
+            RustType::Ref(Mutability::Not, ty, Some(lt)) => write!(f, "&'{lt} {ty}"),
+            RustType::Ref(Mutability::Mut, ty, None) => write!(f, "&mut {ty}"),
+            RustType::Ref(Mutability::Mut, ty, Some(lt)) => write!(f, "&'{lt} mut {ty}"),
             RustType::Raw(Mutability::Not, ty) => write!(f, "*const {ty}"),
             RustType::Raw(Mutability::Mut, ty) => write!(f, "*mut {ty}"),
             RustType::Boxed(ty) => write!(f, "Box<{ty}>"),

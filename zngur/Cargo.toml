@@ -10,6 +10,7 @@ license.workspace = true
 
 [features]
 hotreload = ["zngur-generator/hotreload"]
+std-namespace-fix = ["zngur-generator/std-namespace-fix"]
 
 [dependencies]
 zngur-generator = { version = "=0.4.0", path = "../zngur-generator" }

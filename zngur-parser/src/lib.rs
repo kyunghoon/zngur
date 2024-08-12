@@ -86,6 +86,7 @@ enum ParsedExternCppItem<'a> {
         tr: Option<ParsedRustTrait<'a>>,
         ty: ParsedRustType<'a>,
         methods: Vec<ParsedMethod<'a>>,
+        lifetimes: Vec<&'a str>,
     },
 }
 
@@ -119,6 +120,10 @@ enum ParsedTypeItem<'a> {
     CppValue {
         field: &'a str,
         cpp_type: &'a str,
+    },
+    RustValue {
+        field: &'a str,
+        rust_expr: &'a str,
     },
     CppRef {
         cpp_type: &'a str,
@@ -166,6 +171,7 @@ impl ParsedItem<'_> {
                 let mut layout = None;
                 let mut layout_span = None;
                 let mut cpp_value = None;
+                let mut rust_value = None;
                 let mut cpp_ref = None;
                 for item in items {
                     let item_span = item.span;
@@ -243,6 +249,9 @@ impl ParsedItem<'_> {
                         ParsedTypeItem::CppValue { field, cpp_type } => {
                             cpp_value = Some((field.to_owned(), cpp_type.to_owned()));
                         }
+                        ParsedTypeItem::RustValue { field, rust_expr } => {
+                            rust_value = Some((field.to_owned(), rust_expr.to_owned()));
+                        }
                         ParsedTypeItem::CppRef { cpp_type } => {
                             match layout_span {
                                 Some(span) => {
@@ -315,6 +324,7 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                     constructors,
                     cpp_value,
                     cpp_ref,
+                    rust_value,
                 });
             }
             ParsedItem::Trait { tr, methods } => {
@@ -334,6 +344,7 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                         path: base.iter().chain(Some(&method.name)).cloned().collect(),
                         generics: method.generics,
                         named_generics: vec![],
+                        lifetimes: vec![],
                     },
                     inputs: method.inputs,
                     output: method.output,
@@ -350,11 +361,12 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                                 output: method.output,
                             });
                         }
-                        ParsedExternCppItem::Impl { tr, ty, methods } => {
+                        ParsedExternCppItem::Impl { lifetimes, tr, ty, methods } => {
                             r.extern_cpp_impls.push(ZngurExternCppImpl {
                                 tr: tr.map(|x| x.to_zngur(base)),
                                 ty: ty.to_zngur(base),
                                 methods: methods.into_iter().map(|x| x.to_zngur(base)).collect(),
+                                lifetimes: lifetimes.into_iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                             });
                         }
                     }
@@ -373,7 +385,7 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedRustType<'a> {
     Primitive(PrimitiveRustType),
-    Ref(Mutability, Box<ParsedRustType<'a>>),
+    Ref(Mutability, Box<ParsedRustType<'a>>, Option<&'a str>),
     Raw(Mutability, Box<ParsedRustType<'a>>),
     Boxed(Box<ParsedRustType<'a>>),
     Slice(Box<ParsedRustType<'a>>),
@@ -386,7 +398,7 @@ impl ParsedRustType<'_> {
     fn to_zngur(self, base: &[String]) -> RustType {
         match self {
             ParsedRustType::Primitive(s) => RustType::Primitive(s),
-            ParsedRustType::Ref(m, s) => RustType::Ref(m, Box::new(s.to_zngur(base))),
+            ParsedRustType::Ref(m, s, lt) => RustType::Ref(m, Box::new(s.to_zngur(base)), lt.map(|s| s.to_string())),
             ParsedRustType::Raw(m, s) => RustType::Raw(m, Box::new(s.to_zngur(base))),
             ParsedRustType::Boxed(s) => RustType::Boxed(Box::new(s.to_zngur(base))),
             ParsedRustType::Slice(s) => RustType::Slice(Box::new(s.to_zngur(base))),
@@ -434,6 +446,7 @@ struct ParsedRustPathAndGenerics<'a> {
     path: ParsedPath<'a>,
     generics: Vec<ParsedRustType<'a>>,
     named_generics: Vec<(&'a str, ParsedRustType<'a>)>,
+    lifetimes: Vec<&'a str>,
 }
 
 impl ParsedRustPathAndGenerics<'_> {
@@ -450,6 +463,7 @@ impl ParsedRustPathAndGenerics<'_> {
                 .into_iter()
                 .map(|(name, x)| (name.to_owned(), x.to_zngur(base)))
                 .collect(),
+            lifetimes: self.lifetimes.into_iter().map(|lt| lt.to_string()).collect(),
         }
     }
 }
@@ -556,6 +570,7 @@ enum Token<'a> {
     Plus,
     Eq,
     Question,
+    SingleQuote,
     Comma,
     Semicolon,
     KwDyn,
@@ -615,6 +630,7 @@ impl Display for Token<'_> {
             Token::Plus => write!(f, "+"),
             Token::Eq => write!(f, "="),
             Token::Question => write!(f, "?"),
+            Token::SingleQuote => write!(f, "'"),
             Token::Comma => write!(f, ","),
             Token::Semicolon => write!(f, ";"),
             Token::KwDyn => write!(f, "dyn"),
@@ -656,6 +672,7 @@ fn lexer<'src>(
         just("+").to(Token::Plus),
         just("=").to(Token::Eq),
         just("?").to(Token::Question),
+        just("'").to(Token::SingleQuote),
         just(",").to(Token::Comma),
         just(";").to(Token::Semicolon),
     ])
@@ -720,7 +737,7 @@ fn rust_type<'a>(
             .then(rust_generics(parser.clone()))
             .map(|(_, x)| {
                 assert_eq!(x.len(), 1);
-                ParsedRustType::Boxed(Box::new(x.into_iter().next().unwrap().right().unwrap()))
+                ParsedRustType::Boxed(Box::new(x.into_iter().next().unwrap().unnamed().unwrap()))
             });
         let unit = just(Token::ParenOpen)
             .then(just(Token::ParenClose))
@@ -738,12 +755,14 @@ fn rust_type<'a>(
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose));
         let reference = just(Token::And)
             .ignore_then(
-                just(Token::KwMut)
-                    .to(Mutability::Mut)
-                    .or(empty().to(Mutability::Not)),
+                rust_lifetime().map(Some).or(empty().to(None)).then(
+                    just(Token::KwMut)
+                        .to(Mutability::Mut)
+                        .or(empty().to(Mutability::Not))
+                )
             )
             .then(parser.clone())
-            .map(|(m, x)| ParsedRustType::Ref(m, Box::new(x)));
+            .map(|((lt, m), x)| ParsedRustType::Ref(m, Box::new(x), lt));
         let raw_ptr = just(Token::Star)
             .ignore_then(
                 just(Token::KwMut)
@@ -764,13 +783,39 @@ fn rust_type<'a>(
     })
 }
 
+enum GenericParameter<'a> {
+    Named(&'a str, ParsedRustType<'a>),
+    Unnamed(ParsedRustType<'a>),
+    LifeTime(&'a str),
+}
+impl<'a> GenericParameter<'a> {
+    fn unnamed(self) -> Option<ParsedRustType<'a>> {
+        match self {
+            GenericParameter::Unnamed(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+fn rust_lifetime<'a>() -> impl Parser<
+    'a,
+    ParserInput<'a>,
+    &'a str,
+    extra::Err<Rich<'a, Token<'a>, Span>>,
+> + Clone {
+    just(Token::SingleQuote)
+    .ignore_then(select! {
+        Token::Ident(s) => s,
+    })
+}
+
 fn rust_generics<'a>(
     rust_type: impl Parser<'a, ParserInput<'a>, ParsedRustType<'a>, extra::Err<Rich<'a, Token<'a>, Span>>>
         + Clone,
 ) -> impl Parser<
     'a,
     ParserInput<'a>,
-    Vec<Either<(&'a str, ParsedRustType<'a>), ParsedRustType<'a>>>,
+    Vec<GenericParameter<'a>>,
     extra::Err<Rich<'a, Token<'a>, Span>>,
 > + Clone {
     let named_generic = select! {
@@ -778,14 +823,16 @@ fn rust_generics<'a>(
     }
     .then_ignore(just(Token::Eq))
     .then(rust_type.clone())
-    .map(Either::Left);
+    .map(|(n, t)| GenericParameter::Named(n, t));
+
     just(Token::ColonColon).repeated().at_most(1).ignore_then(
         named_generic
-            .or(rust_type.clone().map(Either::Right))
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::AngleOpen), just(Token::AngleClose)),
+        .or(rust_type.clone().map(GenericParameter::Unnamed))
+        .or(rust_lifetime().map(GenericParameter::LifeTime))
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose)),
     )
 }
 
@@ -803,11 +850,19 @@ fn rust_path_and_generics<'a>(
         .then(generics.clone().repeated().at_most(1).collect::<Vec<_>>())
         .map(|x| {
             let generics = x.1.into_iter().next().unwrap_or_default();
-            let (named_generics, generics) = generics.into_iter().partition_map(|x| x);
+            let (named_generics, generics): (Vec<_>, Vec<Either<_, _>>) = generics.into_iter().partition_map(|x| {
+                match x {
+                    GenericParameter::Named(n, t) => Either::Left((n, t)),
+                    GenericParameter::Unnamed(t) => Either::Right(Either::Left(t)),
+                    GenericParameter::LifeTime(n) => Either::Right(Either::Right(n)),
+                }
+            });
+            let (generics, lifetimes): (Vec<_>, Vec<_>) = generics.into_iter().partition_map(|x| x);
             ParsedRustPathAndGenerics {
                 path: x.0,
                 generics,
                 named_generics,
+                lifetimes,
             }
         })
 }
@@ -885,9 +940,9 @@ fn method<'a>(
                 }
             };
             let (inputs, receiver) = match args.0.get(0) {
-                Some(x) if is_self(x) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move),
-                Some(ParsedRustType::Ref(m, x)) if is_self(x) => {
-                    (args.0[1..].to_vec(), ZngurMethodReceiver::Ref(*m))
+                Some(x) if is_self(&x) => (args.0[1..].to_vec(), ZngurMethodReceiver::Move),
+                Some(ParsedRustType::Ref(m, x, lt)) if is_self(&x) => {
+                    (args.0[1..].to_vec(), ZngurMethodReceiver::Ref(*m, lt.map(|s| s.to_string())))
                 }
                 _ => (args.0, ZngurMethodReceiver::Static),
             };
@@ -976,6 +1031,18 @@ fn type_item<'a>(
                 field: x.0,
                 cpp_type: x.1,
             });
+        let rust_value = just(Token::Sharp)
+            .then(just(Token::Ident("rust_value")))
+            .ignore_then(select! {
+                Token::Str(c) => c,
+            })
+            .then(select! {
+                Token::Str(c) => c,
+            })
+            .map(|x| ParsedTypeItem::RustValue {
+                field: x.0,
+                rust_expr: x.1,
+            });
         let cpp_ref = just(Token::Sharp)
             .then(just(Token::Ident("cpp_ref")))
             .ignore_then(select! {
@@ -986,6 +1053,7 @@ fn type_item<'a>(
             .or(traits)
             .or(constructor)
             .or(cpp_value)
+            .or(rust_value)
             .or(cpp_ref)
             .or(method()
                 .then(
@@ -1060,8 +1128,17 @@ fn extern_cpp_item<'a>(
     let function = method()
         .then_ignore(just(Token::Semicolon))
         .map(ParsedExternCppItem::Function);
-    let impl_block = just(Token::KwImpl)
-        .ignore_then(
+
+    let imp = just(Token::KwImpl).ignore_then(
+        rust_lifetime()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::AngleOpen), just(Token::AngleClose)))
+    .or(just(Token::KwImpl).map(|_| vec!["poops"]));
+    
+    let impl_block = imp
+        .then(
             rust_trait(rust_type())
                 .then_ignore(just(Token::KwFor))
                 .map(Some)
@@ -1075,7 +1152,8 @@ fn extern_cpp_item<'a>(
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::BraceOpen), just(Token::BraceClose)),
         )
-        .map(|((tr, ty), methods)| ParsedExternCppItem::Impl { tr, ty, methods });
+        .map(|((lifetimes, (tr, ty)), methods)| ParsedExternCppItem::Impl { lifetimes, tr, ty, methods });
+
     just(Token::KwExtern)
         .then(just(Token::Str("C++")))
         .ignore_then(

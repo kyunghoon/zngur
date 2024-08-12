@@ -71,6 +71,7 @@ impl ZngurGenerator {
                         let rust_link_names = rust_file.add_constructor(
                             &format!("{}::{}", ty_def.ty, name),
                             &constructor.inputs,
+                            ty_def.rust_value.as_ref(),
                         );
                         cpp_methods.push(CppMethod {
                             name: cpp_handle_keyword(&name).to_owned(),
@@ -83,7 +84,7 @@ impl ZngurGenerator {
                         });
                         cpp_methods.push(CppMethod {
                             name: format!("matches_{}", name),
-                            kind: ZngurMethodReceiver::Ref(Mutability::Not),
+                            kind: ZngurMethodReceiver::Ref(Mutability::Not, None),
                             sig: CppFnSig {
                                 rust_link_name: rust_link_names.match_check,
                                 inputs: vec![ty_def.ty.into_cpp().into_ref()],
@@ -93,7 +94,7 @@ impl ZngurGenerator {
                     }
                     None => {
                         let rust_link_name = rust_file
-                            .add_constructor(&format!("{}", ty_def.ty), &constructor.inputs)
+                            .add_constructor(&format!("{}", ty_def.ty), &constructor.inputs, ty_def.rust_value.as_ref())
                             .constructor;
                         constructors.push(CppFnSig {
                             rust_link_name,
@@ -225,6 +226,7 @@ impl ZngurGenerator {
                 &impl_block.ty,
                 impl_block.tr.as_ref(),
                 &impl_block.methods,
+                &impl_block.lifetimes,
             );
             cpp_file.exported_impls.push(CppExportedImplDefinition {
                 tr: impl_block.tr.map(|x| x.into_cpp()),
@@ -257,9 +259,9 @@ impl ZngurGenerator {
 }
 
 fn real_inputs_of_method(method: &ZngurMethod, ty: &RustType) -> (Vec<RustType>, Vec<CppType>) {
-    let receiver_type = match method.receiver {
+    let receiver_type = match &method.receiver {
         ZngurMethodReceiver::Static => None,
-        ZngurMethodReceiver::Ref(m) => Some(RustType::Ref(m, Box::new(ty.clone()))),
+        ZngurMethodReceiver::Ref(m, lt) => Some(RustType::Ref(*m, Box::new(ty.clone()), lt.clone())),
         ZngurMethodReceiver::Move => Some(ty.clone()),
     };
     let rusty_inputs = receiver_type

@@ -22,15 +22,27 @@ impl CppPath {
         state: &mut State,
         f: impl FnOnce(&mut State) -> std::fmt::Result,
     ) -> std::fmt::Result {
-        for p in self.namespace() {
+        for (n, p) in self.namespace().iter().enumerate() {
+            if n == 0 {
+                write!(state, "\n")?;
+            }
+            #[cfg(feature = "std-namespace-fix")]
+            if p == "std" {
+                write!(state, "namespace {}_ {{ ", p)?;
+            } else {
+                write!(state, "namespace {} {{ ", p)?;
+            }
+            #[cfg(not(feature = "std-namespace-fix"))]
             write!(state, "namespace {} {{ ", p)?;
         }
+        state.ident_inc();
         f(state)?;
-        for _ in self.namespace() {
-            write!(state, "}}")?;
-        }
-        if !self.namespace().is_empty() {
-            writeln!(state, "")?;
+        state.ident_dec();
+        for n in 0..self.namespace().len() {
+            if !state.disable_ending_newline && n == 0 {
+                write!(state, "\n")?;
+            }
+            write!(state, "}} ")?;
         }
         Ok(())
     }
@@ -71,8 +83,13 @@ impl From<&str> for CppPath {
 }
 
 impl Display for CppPath {
+    #[cfg(not(feature = "std-namespace-fix"))]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "::{}", self.0.iter().join("::"))
+    }
+    #[cfg(feature = "std-namespace-fix")]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "::{}", self.0.iter().map(|s| if s == "std" { "std_" } else { s }).join("::"))
     }
 }
 
@@ -112,12 +129,15 @@ impl CppType {
         if !self.path.need_header() {
             return Ok(());
         }
-        self.path.emit_in_namespace(state, |state| {
+        state.disable_ending_newline = true;
+        let ret = self.path.emit_in_namespace(state, |state| {
             if !self.generic_args.is_empty() {
-                write!(state, "template<typename ...T>")?;
+                write!(state, "template<typename ...T> ")?;
             }
             write!(state, "struct {}; ", self.path.name())
-        })
+        });
+        state.disable_ending_newline = false;
+        ret
     }
 }
 
@@ -186,6 +206,8 @@ pub struct State {
     text: String,
     panic_to_exception: bool,
     hotreload: bool,
+    indent_count: usize,
+    disable_ending_newline: bool,
 }
 
 impl State {
@@ -199,6 +221,11 @@ impl State {
         } else {
             "".to_owned()
         }
+    }
+    fn ident_inc(&mut self) { self.indent_count += 1; }
+    fn ident_dec(&mut self) { self.indent_count -= 1; }
+    fn indent(&self) -> String {
+        "    ".repeat(self.indent_count)
     }
 }
 
@@ -226,7 +253,7 @@ impl<'a, W> EmitMode<'a, W> where W: Write {
     pub fn hotreload(&self) -> bool {
         match self {
             EmitMode::Cpp(_, hotreload) => *hotreload,
-            _ => false,
+            _ => true,
         }
     }
 }
@@ -278,12 +305,12 @@ impl CppFnSig {
                 write!(state, ")")?;
             }
             EmitMode::Rust(state) => {
-                write!(state, "    pub {}: extern \"C\" fn(", self.rust_link_name)?;
+                write!(state, "\n    pub {}: extern \"C\" fn(", self.rust_link_name)?;
                 self.emit_params(&mut EmitMode::Rust(*state))?;
                 write!(state, ")")?;
             }
             EmitMode::RustLinkNameOnly(state) => {
-                write!(state, "        {}", self.rust_link_name)?;
+                write!(state, "\n        {}", self.rust_link_name)?;
             }
         }
         Ok(())
@@ -292,8 +319,8 @@ impl CppFnSig {
         self.emit_link(state, true)?;
         match state {
             EmitMode::Cpp(..) => writeln!(state, ";"),
-            EmitMode::Rust(_) => writeln!(state, ","),
-            EmitMode::RustLinkNameOnly(_) => writeln!(state, ","),
+            EmitMode::Rust(_) => write!(state, ","),
+            EmitMode::RustLinkNameOnly(_) => write!(state, ","),
         }
     }
 
@@ -316,31 +343,29 @@ impl CppFnSig {
 
     fn emit_cpp_def(&self, state: &mut State, fn_name: &str) -> std::fmt::Result {
         let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+        let ii = state.indent();
         let CppFnSig {
             inputs,
             output,
             rust_link_name,
         } = self;
-        writeln!(state,
-            "inline {output} {fn_name}({input_defs}) {{
-    {output} o = {{}};{deinits}
-    {api}{rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(o));{panic_handler}
-    ::rust::__zngur_internal_assume_init(o);
-    return o;
-}}",
+        write!(state, r#"
+{ii}inline {output} {fn_name}({input_defs}) {{
+{ii}    {output} o = {{}};{deinits}
+{ii}    {api}{rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(o));{panic_handler}
+{ii}    ::rust::__zngur_internal_assume_init(o);
+{ii}    return o;
+{ii}}}"#,
             input_defs = inputs
                 .iter()
                 .enumerate()
                 .map(|(n, ty)| format!("{ty} i{n}"))
                 .join(", "),
             input_args = (0..inputs.len())
-                .map(|n| format!("::rust::__zngur_internal_data_ptr(i{n}), "))
-                .join(""),
+                .map(|n| format!("::rust::__zngur_internal_data_ptr(i{n}), ")).join(""),
             panic_handler = state.panic_handler(),
-            deinits = (0..inputs.len())
-                .map(|n| format!(r#"
-    ::rust::__zngur_internal_assume_deinit(i{n});"#))
-                .join(""),
+            deinits = (0..inputs.len()).map(|n| format!(r#"
+{ii}    ::rust::__zngur_internal_assume_deinit(i{n});"#)).join(""),
         )
     }
 }
@@ -404,24 +429,46 @@ impl CppTraitDefinition {
                         output: _,
                     },
             } => {
-                writeln!(
-                    state,
-                    "void {rust_link_name}(uint8_t *data, void destructor(uint8_t *),
-                void call(uint8_t *, {} uint8_t *),
-                uint8_t *o);",
-                    (0..inputs.len()).map(|_| "uint8_t *, ").join(" ")
-                )?;
+                match state {
+                    EmitMode::Cpp(_, hotreload) => {
+                        if *hotreload {
+                            writeln!(state, "    void (*{rust_link_name})(data: *mut u8, void destructor(uint8_t *), void call(uint8_t *, {} uint8_t *), o: *mut u8);",
+                                (0..inputs.len()).map(|_| "uint8_t *, ").join(" "))?;
+                        } else {
+                            writeln!(state, "void {rust_link_name}(data: *mut u8, void destructor(uint8_t *), void call(uint8_t *, {} uint8_t *), o: *mut u8);",
+                                (0..inputs.len()).map(|_| "uint8_t *, ").join(" "))?;
+                        }
+                    }
+                    EmitMode::Rust(_) =>
+                        write!(state, "\n    pub {rust_link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(*mut u8), call: extern \"C\" fn(*mut u8, {} *mut u8), o: *mut u8),",
+                            (0..inputs.len()).map(|_| "*mut u8, ").join(" "))?,
+                    EmitMode::RustLinkNameOnly(_) => write!(state, "\n        {rust_link_name},")?,
+                }
             }
             CppTraitDefinition::Normal {
                 link_name,
                 link_name_ref,
                 ..
             } => {
-                writeln!(
-                    state,
-                    "void {link_name}(uint8_t *data, void destructor(uint8_t *), uint8_t *o);"
-                )?;
-                writeln!(state, "void {link_name_ref}(uint8_t *data, uint8_t *o);")?;
+                match state {
+                    EmitMode::Cpp(_, hotreload) => {
+                        if *hotreload {
+                            writeln!(state, "    void (*{link_name})(uint8_t *data, void destructor(uint8_t *), uint8_t *o);")?;
+                            writeln!(state, "    void (*{link_name_ref})(uint8_t *data, uint8_t *o);")?;
+                        } else {
+                            writeln!(state, "void {link_name}(uint8_t *data, void destructor(uint8_t *), uint8_t *o);")?;
+                            writeln!(state, "void {link_name_ref}(uint8_t *data, uint8_t *o);")?;
+                        }
+                    }
+                    EmitMode::Rust(_) => {
+                        write!(state, "\n    pub {link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(*mut u8), o: *mut u8),")?;
+                        write!(state, "\n    pub {link_name_ref}: extern \"C\" fn(data: *mut u8, o: *mut u8),")?;
+                    }
+                    EmitMode::RustLinkNameOnly(_) => {
+                        write!(state, "\n        {link_name},")?;
+                        write!(state, "\n        {link_name_ref},")?;
+                    },
+                }
             }
         }
         Ok(())
@@ -437,6 +484,7 @@ impl CppTraitDefinition {
         else {
             return Ok(());
         };
+
         as_ty.path.emit_in_namespace(state, |state| {
             as_ty.emit_specialization_decl(state)?;
             write!(
@@ -450,15 +498,10 @@ impl CppTraitDefinition {
                 write!(
                     state,
                     r#"
-            virtual {output} {name}({input}) = 0;"#,
+        virtual {output} {name}({input}) = 0;"#,
                     output = method.output,
                     name = method.name,
-                    input = method
-                        .inputs
-                        .iter()
-                        .enumerate()
-                        .map(|(n, x)| format!("{x} i{n}"))
-                        .join(", "),
+                    input = method.inputs.iter().enumerate().map(|(n, x)| format!("{x} i{n}")).join(", "),
                 )?;
             }
             write!(
@@ -560,9 +603,8 @@ impl CppTypeDefinition {
                 .wellknown_traits
                 .contains(&ZngurWellknownTraitData::Unsized);
             if is_unsized {
-                writeln!(
-                    state,
-r#"namespace rust {{
+                write!(state, r#"
+namespace rust {{
     template<> struct {ref_kind}<{ty}> {{
         {ref_kind}() {{ data = {{0, 0}}; }}
     private:
@@ -571,9 +613,8 @@ r#"namespace rust {{
                     ty = self.ty,
                 )?;
             } else {
-                writeln!(
-                    state,
-r#"namespace rust {{
+                write!(state, r#"
+namespace rust {{
     template<> struct {ref_kind}<{ty}> {{
         {ref_kind}() {{ data = 0; }}
         {ref_kind}(const {ty}& t) {{ ::rust::__zngur_internal_check_init<{ty}>(t); data = reinterpret_cast<size_t>(__zngur_internal_data_ptr(t)); }}
@@ -583,19 +624,13 @@ r#"namespace rust {{
                     ty = self.ty,
                 )?;
             }
-            writeln!(state, "    public:")?;
+            write!(state, "\n    public:")?;
             if ref_kind == "Ref" {
-                writeln!(
-                    state,
-r#"        Ref(RefMut<{ty}> rm) {{ data = rm.data; }}"#,
-                    ty = self.ty,
-                )?;
+                write!(state, r#"
+        Ref(RefMut<{ty}> rm) {{ data = rm.data; }}"#, ty = self.ty)?;
             } else {
-                writeln!(
-                    state,
-r#"        friend Ref<{ty}>;"#,
-                    ty = self.ty,
-                )?;
+                write!(state, r#"
+        friend Ref<{ty}>;"#, ty = self.ty)?;
             }
             match &self.from_trait_ref {
                 Some(RustTrait::Fn { inputs, output, .. }) => {
@@ -604,40 +639,29 @@ r#"        friend Ref<{ty}>;"#,
                         output.into_cpp(),
                         inputs.iter().map(|x| x.into_cpp()).join(", ")
                     );
-                    writeln!(
-                        state,
-r#"        inline {ty}({as_std_function} f);"#,
-                        ty = self.ty.path.name(),
-                    )?;
+                    write!(state, r#"
+        inline {ty}({as_std_function} f);"#, ty = self.ty.path.name())?;
                 }
                 Some(tr @ RustTrait::Normal { .. }) => {
                     let tr = tr.into_cpp();
-                    writeln!(
-                        state,
-r#"        inline {ref_kind}({tr}& arg);"#,
-                    )?;
+                    write!(state, r#"
+        inline {ref_kind}({tr}& arg);"#)?;
                 }
                 None => (),
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
                 let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
-                writeln!(
-                    state,
-r#"        inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#
-                )?;
+                write!(state, r#"
+        inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
             }
             if let Some(cpp_ty) = &self.cpp_ref {
-                writeln!(
-                    state,
-r#"        inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#
-                )?;
-                writeln!(
-                    state,
-r#"        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#
-                )?;
+                write!(state, r#"
+        inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+                write!(state, r#"
+        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
             }
             for method in &self.methods {
-                if let ZngurMethodReceiver::Ref(m) = method.kind {
+                if let ZngurMethodReceiver::Ref(m, _) = method.kind {
                     if m == Mutability::Mut && ref_kind == "Ref" {
                         continue;
                     }
@@ -646,8 +670,7 @@ r#"        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(
                         inputs,
                         output,
                     } = &method.sig;
-                    writeln!(state,
-                        "        {output} {fn_name}({input_defs}) const;",
+                    write!(state, "\n        {output} {fn_name}({input_defs}) const;",
                         fn_name = &method.name,
                         input_defs = inputs
                             .iter()
@@ -659,8 +682,8 @@ r#"        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(
                 }
             }
             if self.ty.path.to_string() == "::rust::Str" && ref_kind == "Ref" {
-                writeln!(state,
-r#"        friend Str;
+                write!(state, r#"
+        friend Str;
     }};
     inline Ref<::rust::Str> Str::from_char_star(const char* s) {{
         Ref<Str> o;
@@ -669,10 +692,10 @@ r#"        friend Str;
         return o;
     }}"#)?;
             } else {
-                writeln!(state, "    }};")?;
+                write!(state, "\n    }};")?;
             }
-            writeln!(state,
-r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ref_kind}<{ty}>>(const {ref_kind}<{ty}>& t) {{ return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t.data)); }}
+            write!(state, r#"
+    template<> inline uint8_t* __zngur_internal_data_ptr<{ref_kind}<{ty}>>(const {ref_kind}<{ty}>& t) {{ return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t.data)); }}
     template<> inline void __zngur_internal_assume_init<{ref_kind}<{ty}>>({ref_kind}<{ty}>&) {{ }}
     template<> inline void __zngur_internal_check_init<{ref_kind}<{ty}>>(const {ref_kind}<{ty}>&) {{ }}
     template<> inline void __zngur_internal_assume_deinit<{ref_kind}<{ty}>>({ref_kind}<{ty}>&) {{ }}
@@ -682,6 +705,9 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ref_kind}<{ty}>>(co
                 size = if is_unsized { 16 } else { 8 },
             )?;
         }
+        if let Some(cpp_ty) = &self.cpp_ref {
+            write!(state, "\ntemplate<> struct __zngur__to_rust_ref<{cpp_ty}> {{ typedef {ty} type; }};", ty = self.ty)?;
+        }
         Ok(())
     }
 
@@ -689,8 +715,8 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ref_kind}<{ty}>>(co
         let is_copy = self
             .wellknown_traits
             .contains(&ZngurWellknownTraitData::Copy);
-        writeln!(state,
-r#"namespace rust {{
+        write!(state, r#"
+namespace rust {{
     template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t);
     template<> inline void __zngur_internal_check_init<{ty}>(const {ty}& t);
     template<> inline void __zngur_internal_assume_init<{ty}>({ty}& t);
@@ -701,24 +727,20 @@ r#"namespace rust {{
         )?;
         self.ty.path.emit_in_namespace(state, |state| {
             if self.ty.path.0 == ["rust", "Unit"] {
-                write!(state,
-                    "template<> struct Tuple<> {{ ::std::array<::uint8_t, 1> data; }};"
-                )?;
+                write!(state, "\n{}template<> struct Tuple<> {{ ::std::array<::uint8_t, 1> data; }};", state.indent())?;
                 return Ok(());
             } else {
                 self.ty.emit_specialization_decl(state)?;
             }
             match self.layout {
                 CppLayoutPolicy::OnlyByRef => {
-                    writeln!(state,
-r#" {{
+                    write!(state, r#" {{
     public:
         {ty}() = delete;"#,
-                        ty = self.ty.path.name(),
-                    )?;
+                        ty = self.ty.path.name())?;
                     if self.ty.path.to_string() == "::rust::Str" {
-                        writeln!(state,
-r#"        static inline ::rust::Ref<::rust::Str> from_char_star(const char* s);"#,
+                        write!(state, r#"
+        static inline ::rust::Ref<::rust::Str> from_char_star(const char* s);"#,
                         )?;
                     }
                 }
@@ -726,23 +748,20 @@ r#"        static inline ::rust::Ref<::rust::Str> from_char_star(const char* s);
                     match self.layout {
                         CppLayoutPolicy::StackAllocated { size, align } => {
                             let size = size.max(1);
-                            writeln!(state,
-r#" {{
+                            write!(state, r#" {{
     private:
         alignas({align}) mutable ::std::array<uint8_t, {size}> data;"#,
                             )?;
                         }
                         CppLayoutPolicy::HeapAllocated { .. } => {
-                            writeln!(state,
-r#" {{
+                            write!(state, r#" {{
     private:
-        uint8_t* data;"#,
-                            )?;
+        uint8_t* data;"#)?;
                         }
                         CppLayoutPolicy::OnlyByRef => unreachable!(),
                     }
-                    writeln!(state,
-r#"        friend uint8_t* ::rust::__zngur_internal_data_ptr<{ty}>(const {ty}& t);
+                    write!(state, r#"
+        friend uint8_t* ::rust::__zngur_internal_data_ptr<{ty}>(const {ty}& t);
         friend void ::rust::__zngur_internal_check_init<{ty}>(const {ty}& t);
         friend void ::rust::__zngur_internal_assume_init<{ty}>({ty}& t);
         friend void ::rust::__zngur_internal_assume_deinit<{ty}>({ty}& t);
@@ -755,15 +774,15 @@ r#"        friend uint8_t* ::rust::__zngur_internal_data_ptr<{ty}>(const {ty}& t
                             CppLayoutPolicy::StackAllocated { size: 1, align: 1 }
                         );
                         assert!(is_copy);
-                        writeln!(state,
-r#"        public:
+                        write!(state, r#"
+    public:
         operator bool() {{ return data[0] != 0; }}
         Bool(bool b) {{ data[0] = b; }}
     private:"#,
                         )?;
                     }
                     if !is_copy {
-                        writeln!(state, "        bool drop_flag;")?;
+                        write!(state, "\n        bool drop_flag;")?;
                     }
                     let (alloc_heap, free_heap, copy_data) = match &self.layout {
                         CppLayoutPolicy::StackAllocated { .. } => (
@@ -782,10 +801,10 @@ r#"        public:
                         ),
                         CppLayoutPolicy::OnlyByRef => unreachable!(),
                     };
-                    writeln!(state, "    public:")?;
+                    write!(state, "\n    public:")?;
                     if is_copy {
-                        writeln!(state,
-r#"        {ty}() {{ {alloc_heap} }}
+                        write!(state, r#"
+        {ty}() {{ {alloc_heap} }}
         ~{ty}() {{ {free_heap} }}
         {ty}(const {ty}& other) {{
             {alloc_heap}
@@ -817,8 +836,8 @@ r#"        {ty}() {{ {alloc_heap} }}
                                 _ => None,
                             })
                             .unwrap();
-                        writeln!(state,
-r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
+                        write!(state, r#"
+        {ty}() : drop_flag(false) {{ {alloc_heap} }}
         ~{ty}() {{
             if (drop_flag) {{ {api}{drop_in_place}(&data[0]); }}{free_heap}
         }}
@@ -846,17 +865,13 @@ r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
                                 output.into_cpp(),
                                 inputs.iter().map(|x| x.into_cpp()).join(", ")
                             );
-                            writeln!(
-                                state,
-                                r#"
+                            write!(state, r#"
         static inline {ty} make_box({as_std_function} f);"#,
                                 ty = self.ty.path.name(),
                             )?;
                         }
                         Some(RustTrait::Normal { .. }) => {
-                            writeln!(
-                                state,
-                                r#"
+                            write!(state, r#"
                         template<typename T, typename... Args> static {ty} make_box(Args&&... args);"#,
                                 ty = self.ty.path.name(),
                             )?;
@@ -867,14 +882,11 @@ r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
                 let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
-                writeln!(
-                    state,
-                    r#"
-                    inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(&data[0])).as_cpp<{cpp_ty}>(); }}"#
-                )?;
+                write!(state, r#"
+        inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(&data[0])).as_cpp<{cpp_ty}>(); }}"#)?;
             }
             for method in &self.methods {
-                write!(state, "        static ")?;
+                write!(state, "\n        static ")?;
                 method.sig.emit_cpp_header(state, &method.name)?;
                 if method.kind != ZngurMethodReceiver::Static {
                     let CppFnSig {
@@ -882,9 +894,7 @@ r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
                         inputs,
                         output,
                     } = &method.sig;
-                    writeln!(
-                        state,
-                        "        {output} {fn_name}({input_defs}) {const_kw};",
+                    write!(state, "\n        {output} {fn_name}({input_defs}) {const_kw};",
                         fn_name = &method.name,
                         input_defs = inputs
                             .iter()
@@ -892,7 +902,7 @@ r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
                             .enumerate()
                             .map(|(n, ty)| format!("{ty} i{n}"))
                             .join(", "),
-                        const_kw = if method.kind != ZngurMethodReceiver::Ref(Mutability::Not) {
+                        const_kw = if !matches!(method.kind, ZngurMethodReceiver::Ref(Mutability::Not, _)) {
                             ""
                         } else {
                             "const"
@@ -913,20 +923,20 @@ r#"        {ty}() : drop_flag(false) {{ {alloc_heap} }}
                         .join(", "),
                 )?;
             }
-            writeln!(state, "    }};")
+            write!(state, "\n    }};")
         })?;
         let ty = &self.ty;
         if self.layout != CppLayoutPolicy::OnlyByRef {
             match &self.layout {
                 CppLayoutPolicy::StackAllocated { size, align: _ } => {
-                    writeln!(state,
-r#"namespace rust {{
+                    write!(state, r#"
+namespace rust {{
     template<> inline size_t __zngur_internal_size_of<{ty}>() {{ return {size}; }}"#,
                     )?;
                 }
                 CppLayoutPolicy::HeapAllocated { size_fn, .. } => {
-                    writeln!(state,
-r#"namespace rust {{
+                    write!(state, r#"
+namespace rust {{
     template<> inline size_t __zngur_internal_size_of<{ty}>() {{ return {size_fn}(); }}"#,
                     )?;
                 }
@@ -934,14 +944,14 @@ r#"namespace rust {{
             }
 
             if is_copy {
-                writeln!(state,
-r#"    template<> inline void __zngur_internal_check_init<{ty}>(const {ty}&) {{ }}
+                write!(state, r#"
+    template<> inline void __zngur_internal_check_init<{ty}>(const {ty}&) {{ }}
     template<> inline void __zngur_internal_assume_init<{ty}>({ty}&) {{ }}
     template<> inline void __zngur_internal_assume_deinit<{ty}>({ty}&) {{ }}"#,
                 )?;
             } else {
-                writeln!(state,
-r#"    template<> inline void __zngur_internal_check_init<{ty}>(const {ty}& t) {{
+                write!(state, r#"
+    template<> inline void __zngur_internal_check_init<{ty}>(const {ty}& t) {{
         if (!t.drop_flag) {{
             ::std::cerr << "Use of uninitialized or moved Zngur Rust object with type {ty}" << ::std::endl;
             while (true) raise(SIGSEGV);
@@ -954,8 +964,8 @@ r#"    template<> inline void __zngur_internal_check_init<{ty}>(const {ty}& t) {
     }}"#,
                 )?;
             }
-            writeln!(state,
-r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>({ty} const & t) {{ return const_cast<uint8_t*>(&t.data[0]); }}
+            write!(state, r#"
+    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>({ty} const & t) {{ return const_cast<uint8_t*>(&t.data[0]); }}
 }}"#,
             )?;
         }
@@ -980,8 +990,7 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>({ty} const & t
                 output: _,
                 rust_link_name,
             } = c;
-            writeln!(state,
-                "inline {fn_name}({input_defs}) {{
+            write!(state, "\ninline {fn_name}({input_defs}) {{
     ::rust::__zngur_internal_assume_init(*this);
     {api}{rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(*this));
     {deinits}
@@ -1046,8 +1055,8 @@ return o;
                 link_name,
                 link_name_ref: _,
             }) => {
-                writeln!(state,
-r#"template<typename T, typename... Args> {my_name} {my_name}::make_box(Args&&... args) {{
+                write!(state, r#"
+template<typename T, typename... Args> {my_name} {my_name}::make_box(Args&&... args) {{
     auto data = new T(::std::forward<Args>(args)...);
     auto data_as_impl = dynamic_cast<{as_ty}*>(data);
     {my_name} o;
@@ -1100,7 +1109,7 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
         for method in &self.methods {
             let fn_name = my_name.to_owned() + "::" + &method.name;
             method.sig.emit_cpp_def(state, &fn_name)?;
-            if let ZngurMethodReceiver::Ref(m) = method.kind {
+            if let ZngurMethodReceiver::Ref(m, _) = method.kind {
                 let ref_kinds: &[&str] = match m {
                     Mutability::Mut => &["RefMut"],
                     Mutability::Not => &["Ref", "RefMut"],
@@ -1111,9 +1120,7 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
                         inputs,
                         output,
                     } = &method.sig;
-                    writeln!(
-                        state,
-                        "inline {output} rust::{ref_kind}<{ty}>::{method_name}({input_defs}) const {{ return {fn_name}(*this{input_args}); }}",
+                    write!(state, "\ninline {output} rust::{ref_kind}<{ty}>::{method_name}({input_defs}) const {{ return {fn_name}(*this{input_args}); }}",
                         ty = &self.ty,
                         method_name = &method.name,
                         input_defs = inputs
@@ -1134,11 +1141,9 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
                     inputs,
                     output,
                 } = &method.sig;
-                writeln!(
-                    state,
-                    "inline {output} {fn_name}({input_defs}) {const_kw} {{ return {fn_name}({this_arg}{input_args}); }}",
+                write!(state, "\ninline {output} {fn_name}({input_defs}) {const_kw} {{ return {fn_name}({this_arg}{input_args}); }}",
                     this_arg = match method.kind {
-                        ZngurMethodReceiver::Ref(_) => "*this",
+                        ZngurMethodReceiver::Ref(_, _) => "*this",
                         ZngurMethodReceiver::Move => "::std::move(*this)",
                         ZngurMethodReceiver::Static => unreachable!(),
                     },
@@ -1151,7 +1156,7 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
                     input_args = (0..inputs.len() - 1)
                         .map(|n| format!(", ::std::move(i{n})"))
                         .join(""),
-                    const_kw = if method.kind != ZngurMethodReceiver::Ref(Mutability::Not) {
+                    const_kw = if !matches!(method.kind, ZngurMethodReceiver::Ref(Mutability::Not, _)) {
                         ""
                     } else {
                         "const"
@@ -1166,8 +1171,8 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
                     pretty_print,
                     debug_print: _, // TODO: use it
                 } => {
-                    writeln!(state,
-r#"namespace rust {{
+                    write!(state, r#"
+namespace rust {{
     template<> inline void zngur_pretty_print<{ty}>({ty} const& t) {{
         ::rust::__zngur_internal_check_init<{ty}>(t);
         {api}{pretty_print}(&t.data[0]);
@@ -1201,10 +1206,10 @@ r#"namespace rust {{
                     }
                 }
                 EmitMode::Rust(state) => {
-                    writeln!(state, "    pub {}: extern \"C\" fn(v: *mut u8) -> *mut ZngurCppOpaqueOwnedObject,", cpp_value.0)?;
+                    write!(state, "\n    pub {}: extern \"C\" fn(v: *mut u8) -> *mut ZngurCppOpaqueOwnedObject,", cpp_value.0)?;
                 }
                 EmitMode::RustLinkNameOnly(state) => {
-                    writeln!(state, "        {},", cpp_value.0)?;
+                    write!(state, "\n        {},", cpp_value.0)?;
                 }
             }
         }
@@ -1235,12 +1240,12 @@ r#"namespace rust {{
                             }
                         }
                         EmitMode::Rust(state) => {
-                            writeln!(state, "    pub {pretty_print}: extern \"C\" fn(data: *mut u8),")?;
-                            writeln!(state, "    pub {debug_print}: extern \"C\" fn(data: *mut u8),")?;
+                            write!(state, "\n    pub {pretty_print}: extern \"C\" fn(data: *mut u8),")?;
+                            write!(state, "\n    pub {debug_print}: extern \"C\" fn(data: *mut u8),")?;
                         }
                         EmitMode::RustLinkNameOnly(state) => {
-                            writeln!(state, "        {pretty_print},")?;
-                            writeln!(state, "        {debug_print},")?;
+                            write!(state, "\n        {pretty_print},")?;
+                            write!(state, "\n        {debug_print},")?;
                         }
                     }
                 }
@@ -1255,10 +1260,10 @@ r#"namespace rust {{
                             }
                         }
                         EmitMode::Rust(state) => {
-                            writeln!(state, "    pub {drop_in_place}: extern \"C\" fn(data: *mut u8),")?;
+                            write!(state, "\n    pub {drop_in_place}: extern \"C\" fn(data: *mut u8),")?;
                         }
                         EmitMode::RustLinkNameOnly(state) => {
-                            writeln!(state, "        {drop_in_place},")?;
+                            write!(state, "\n        {drop_in_place},")?;
                         }
                     }
                 }
@@ -1323,8 +1328,9 @@ impl CppFile {
         } else {
             ""
         };
-
         state.text += r#"
+template<typename T> struct __zngur__to_rust_ref;
+
 namespace rust {
     template<typename T> uint8_t* __zngur_internal_data_ptr(const T& t);
     template<typename T> void __zngur_internal_assume_init(T& t);
@@ -1383,8 +1389,8 @@ namespace rust {
                 "unsigned long".to_string(),
             ])
         {
-            writeln!(state,
-r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t) {{ return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t)); }}
+            write!(state, r#"
+    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t) {{ return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t)); }}
     template<> inline void __zngur_internal_assume_init<{ty}>({ty}&) {{}} template<>
     inline void __zngur_internal_assume_deinit<{ty}>({ty}&) {{}}
     template<> inline size_t __zngur_internal_size_of<{ty}>() {{ return sizeof({ty}); }}
@@ -1412,6 +1418,8 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
     }};"#)?;
         }
         writeln!(state, "}}")?;
+
+        // TODO: this section needs deduping, but c++ doesn't seem to mind
         self.emit_links(&mut EmitMode::Cpp(state, state.hotreload))?;
         for td in &self.type_defs {
             td.ty.emit_header(state)?;
@@ -1422,6 +1430,12 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
                 tr.emit_header(state)?;
             }
         }
+        for (_, td) in &self.trait_defs {
+            if let CppTraitDefinition::Normal { as_ty, .. } = td {
+                as_ty.emit_header(state)?;
+            }
+        }
+
         for (_, td) in &self.trait_defs {
             td.emit(state)?;
         }
@@ -1435,21 +1449,22 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
             fd.emit_cpp_def(state)?;
         }
         for func in &self.exported_fn_defs {
-            writeln!(state, "namespace rust {{ namespace exported_functions {{")?;
-            write!(state, "   {} {}(", func.sig.output, func.name)?;
+            write!(state, "\nnamespace rust {{ namespace exported_functions {{")?;
+            write!(state, "\n   {} {}(", func.sig.output, func.name)?;
             for (n, ty) in func.sig.inputs.iter().enumerate() {
                 if n != 0 {
                     write!(state, ", ")?;
                 }
                 write!(state, "{ty} i{n}")?;
             }
-            writeln!(state, ");")?;
-            writeln!(state, "}} }}")?;
+            write!(state, ");")?;
+            write!(state, "\n}} }}")?;
         }
         for imp in &self.exported_impls {
-            writeln!(
-                state,
-                "namespace rust {{ template<> class Impl<{}, {}> {{ public:",
+            write!(state, r#"
+namespace rust {{
+    template<> class Impl<{}, {}> {{
+    public:"#,
                 imp.ty,
                 match &imp.tr {
                     Some(x) => format!("{x}"),
@@ -1457,16 +1472,16 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
                 }
             )?;
             for (name, sig) in &imp.methods {
-                write!(state, "   static {} {}(", sig.output, name)?;
+                write!(state, "\n       static {} {}(", sig.output, name)?;
                 for (n, ty) in sig.inputs.iter().enumerate() {
                     if n != 0 {
                         write!(state, ", ")?;
                     }
                     write!(state, "{ty} i{n}")?;
                 }
-                writeln!(state, ");")?;
+                write!(state, ");")?;
             }
-            writeln!(state, "}}; }}")?;
+            write!(state, "\n    }};\n}}")?;
         }
         Ok(())
     }
@@ -1487,8 +1502,8 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
             td.emit_links(state)?;
         }
         if state.hotreload() {
-            writeln!(state, "}};")?;
-            writeln!(state, "struct ZngurCApi {{")?;
+            write!(state, "}};")?;
+            write!(state, "\nstruct ZngurCApi {{")?;
             for func in &self.exported_fn_defs {
                 write!(state, "    void (*{})(", func.sig.rust_link_name)?;
                 func.sig.emit_params(state)?;
@@ -1501,12 +1516,12 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
                     writeln!(state, ");")?;
                 }
             }
-            writeln!(state, "}};")?;
-            writeln!(state, "ZngurRsApi& GetZngurRsApi();")?;
-            writeln!(state, "ZngurCApi __zngur_get_capi();")?;
-            writeln!(state, "typedef ZngurRsApi(*ZngurGetRsApiFn)(ZngurCApi);")?;
+            write!(state, "}};")?;
+            write!(state, "\nZngurRsApi& GetZngurRsApi();")?;
+            write!(state, "\nZngurCApi __zngur_get_capi();")?;
+            write!(state, "\ntypedef ZngurRsApi(*ZngurGetRsApiFn)(ZngurCApi);")?;
         } else {
-            writeln!(state, "}}")?;
+            write!(state, "\n}}")?;
         }
         Ok(())
     }
@@ -1596,11 +1611,15 @@ r#"    template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t)
             text: "".to_owned(),
             panic_to_exception: self.panic_to_exception,
             hotreload,
+            indent_count: 0,
+            disable_ending_newline: false,
         };
         let mut cpp_file = State {
             text: "".to_owned(),
             panic_to_exception: self.panic_to_exception,
             hotreload,
+            indent_count: 0,
+            disable_ending_newline: false,
         };
         self.emit_h_file(&mut h_file).unwrap();
         let mut is_cpp_needed = false;
