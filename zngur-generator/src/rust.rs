@@ -234,11 +234,13 @@ impl RustFile {
             w!(self, "\n{ind}let mut i{n} = ::core::mem::MaybeUninit::new(i{n});")
         }
         w!(self, "\n{ind}let mut r = ::core::mem::MaybeUninit::uninit();");
-        if self.hotreload {
-            w!(self, "\n{ind}(GetZngurCApi().");
+        w!(self, "\n{ind}");
+        let is_call = name == "call";
+        if self.hotreload && !is_call {
+            w!(self, "(GetZngurCApi().");
         }
         w!(self, "{name}");
-        if self.hotreload {
+        if self.hotreload && !is_call {
             w!(self, ")");
         }
         w!(self, "(");
@@ -505,32 +507,42 @@ extern "C" {{"#);
         methods: &[ZngurMethod],
         lifetimes: &[String],
     ) -> Vec<String> {
-        let mut mangled_names = vec![];
-        w!(self, r#"
-extern "C" {{"#);
-        for method in methods {
-            let mn = mangle_name(&format!("{}_extern_method_{}", owner, method.name));
-            w!(
-                self,
-                r#"
-    fn {mn}("#
-            );
-            let input_offset = if method.receiver == ZngurMethodReceiver::Static { 0 } else { 1 };
-            for n in 0..method.inputs.len() + input_offset {
-                w!(self, "i{n}: *mut u8, ");
+        let mangled_names = if self.hotreload {
+            let mut mangled_names = vec![];
+            for method in methods {
+                let mn = mangle_name(&format!("{}_extern_method_{}", owner, method.name));
+                mangled_names.push(mn);
             }
-            w!(self, r#"o: *mut u8);"#);
-            mangled_names.push(mn);
-        }
-        w!(self, "\n}}");
+            mangled_names
+        } else {
+            let mut mangled_names = vec![];
+            w!(self, r#"
+extern "C" {{"#);
+            for method in methods {
+                let mn = mangle_name(&format!("{}_extern_method_{}", owner, method.name));
+                w!(
+                    self,
+                    r#"
+    fn {mn}("#);
+                let input_offset = if method.receiver == ZngurMethodReceiver::Static { 0 } else { 1 };
+                for n in 0..method.inputs.len() + input_offset {
+                    w!(self, "i{n}: *mut u8, ");
+                }
+                w!(self, r#"o: *mut u8);"#);
+                mangled_names.push(mn);
+            }
+            w!(self, r#"
+}}"#);
+            mangled_names
+        };
+        let owner_lts = match owner {
+            RustType::Adt(RustPathAndGenerics { lifetimes, .. }) =>
+                lifetimes.iter().map(|lt| format!("'{lt}")).collect::<Vec<_>>().join(", "),
+            _ => "".to_string(),
+        };
         match tr {
             Some(tr) => {
                 let impl_lts = lifetimes.iter().map(|lt| format!("'{lt}")).collect::<Vec<_>>().join(", ");
-                let owner_lts = match owner {
-                    RustType::Adt(RustPathAndGenerics { lifetimes, .. }) =>
-                        lifetimes.iter().map(|lt| format!("'{lt}")).collect::<Vec<_>>().join(", "),
-                    _ => "".to_string(),
-                };
                 let (tr, assocs) = tr.clone().take_assocs();
                 w!(self, r#"
 impl{impl_lts} {tr} for {owner}{owner_lts} {{"#,
@@ -543,7 +555,9 @@ impl{impl_lts} {tr} for {owner}{owner_lts} {{"#,
                 }
             }
             None => w!(self, r#"
-impl {owner} {{"#),
+impl {owner}{owner_lts} {{"#,
+                owner_lts = if owner_lts.is_empty() { owner_lts } else { format!("<{owner_lts}>") },
+            ),
         }
         for (mn, method) in mangled_names.iter().zip(methods) {
             if tr.is_none() {
@@ -588,8 +602,8 @@ impl {owner} {{"#),
         output: &RustType,
     ) -> String {
         let mangled_name = mangle_name(rust_name);
-        w!(self,
-r#"extern "C" {{ fn {mangled_name}("#
+        w!(self, r#"
+extern "C" {{ fn {mangled_name}("#
         );
         for (n, _) in inputs.iter().enumerate() {
             w!(self, "i{n}: *mut u8, ");
@@ -649,10 +663,7 @@ pub(crate) fn {rust_name}("#
                     wln!(this, "    use ::{};", use_path.iter().join("::"));
                 }
             }
-            w!(
-                this,
-                "    ::std::ptr::write(o as *mut {output}, {rust_name}("
-            );
+            w!(this, "    ::std::ptr::write(o as *mut {output}, {rust_name}(");
             if deref {
                 w!(this, "&");
             }
@@ -684,9 +695,9 @@ pub(crate) fn {rust_name}("#
             ZngurWellknownTrait::Debug => {
                 let pretty_print = mangle_name(&format!("{ty}=debug_pretty"));
                 let debug_print = mangle_name(&format!("{ty}=debug_print"));
-                wln!(self, r#"
+                w!(self, r#"
 #[allow(non_snake_case)] {mangle}{public}extern "C" fn {pretty_print}(v: *mut u8) {{ eprintln!("{{:#?}}", unsafe {{ &*(v as *mut {ty}) }}); }}"#);
-                wln!(self, r#"
+                w!(self, r#"
 #[allow(non_snake_case)] {mangle}{public}extern "C" fn {debug_print}(v: *mut u8) {{ eprintln!("{{:?}}", unsafe {{ &*(v as *mut {ty}) }}); }}"#);
                 ZngurWellknownTraitData::Debug {
                     pretty_print,
@@ -697,9 +708,8 @@ pub(crate) fn {rust_name}("#
     }
 
     pub(crate) fn enable_panic_to_exception(&mut self) {
-        wln!(
-            self,
-            r#"thread_local! {{
+        w!(self, r#"
+thread_local! {{
             pub static PANIC_PAYLOAD: ::std::cell::Cell<Option<()>> = ::std::cell::Cell::new(None);
         }}
         #[allow(non_snake_case)] #[no_mangle] pub fn __zngur_detect_panic() -> u8 {{

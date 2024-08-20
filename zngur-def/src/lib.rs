@@ -94,6 +94,7 @@ pub struct ZngurType {
     pub cpp_value: Option<(String, String)>,
     pub cpp_ref: Option<String>,
     pub rust_value: Option<(String, String)>,
+    pub alias: Option<RustType>,
 }
 
 pub struct ZngurTrait {

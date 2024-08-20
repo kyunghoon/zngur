@@ -158,6 +158,7 @@ impl ZngurGenerator {
                     (rust_link_name, cpp_type)
                 }),
                 cpp_ref: ty_def.cpp_ref,
+                alias: ty_def.alias,
                 from_trait: if let RustType::Boxed(b) = &ty_def.ty {
                     if let RustType::Dyn(tr, _) = b.as_ref() {
                         if let RustTrait::Fn {

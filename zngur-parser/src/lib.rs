@@ -125,9 +125,8 @@ enum ParsedTypeItem<'a> {
         field: &'a str,
         rust_expr: &'a str,
     },
-    CppRef {
-        cpp_type: &'a str,
-    },
+    CppRef { cpp_type: &'a str, },
+    Alias { ident: &'a str, }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +172,7 @@ impl ParsedItem<'_> {
                 let mut cpp_value = None;
                 let mut rust_value = None;
                 let mut cpp_ref = None;
+                let mut alias = None;
                 for item in items {
                     let item_span = item.span;
                     let item = item.inner;
@@ -265,6 +265,17 @@ impl ParsedItem<'_> {
                             }
                             cpp_ref = Some(cpp_type.to_owned());
                         }
+                        ParsedTypeItem::Alias { ident } => {
+                            alias = Some(RustType::Adt(RustPathAndGenerics {
+                                path: base.iter().map(|s| s.as_str())
+                                    .chain(std::iter::once(ident))
+                                    .map(|p| p.to_owned())
+                                    .collect(),
+                                generics: vec![],
+                                named_generics: vec![],
+                                lifetimes: vec![],
+                            }));
+                        }
                     }
                 }
                 let is_unsized = wellknown_traits
@@ -325,6 +336,7 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                     cpp_value,
                     cpp_ref,
                     rust_value,
+                    alias,
                 });
             }
             ParsedItem::Trait { tr, methods } => {
@@ -1049,12 +1061,19 @@ fn type_item<'a>(
                 Token::Str(c) => c,
             })
             .map(|x| ParsedTypeItem::CppRef { cpp_type: x });
+        let alias = just(Token::Sharp)
+            .then(just(Token::Ident("alias")))
+            .ignore_then(select! {
+                Token::Ident(c) => c,
+            })
+            .map(|x| ParsedTypeItem::Alias { ident: x });
         layout
             .or(traits)
             .or(constructor)
             .or(cpp_value)
             .or(rust_value)
             .or(cpp_ref)
+            .or(alias)
             .or(method()
                 .then(
                     just(Token::KwUse)
