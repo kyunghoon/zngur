@@ -145,14 +145,6 @@ pub enum PrimitiveRustType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RustPathAndGenerics {
-    pub path: Vec<String>,
-    pub generics: Vec<RustType>,
-    pub named_generics: Vec<(String, RustType)>,
-    pub lifetimes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RustType {
     Primitive(PrimitiveRustType),
     Ref(Mutability, Box<RustType>, Option<String>),
@@ -162,6 +154,32 @@ pub enum RustType {
     Dyn(RustTrait, Vec<String>),
     Tuple(Vec<RustType>),
     Adt(RustPathAndGenerics),
+    Enum(RustEnum),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RustEnum {
+    pub path: Vec<String>,
+}
+
+impl Display for RustEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for p in &self.path {
+            if p != "crate" {
+                write!(f, "::")?;
+            }
+            write!(f, "{p}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RustPathAndGenerics {
+    pub path: Vec<String>,
+    pub generics: Vec<RustType>,
+    pub named_generics: Vec<(String, RustType)>,
+    pub lifetimes: Vec<String>,
 }
 
 impl RustType {
@@ -237,6 +255,7 @@ impl Display for RustType {
             RustType::Boxed(ty) => write!(f, "Box<{ty}>"),
             RustType::Tuple(v) => write!(f, "({})", v.iter().join(", ")),
             RustType::Adt(pg) => write!(f, "{pg}"),
+            RustType::Enum(e) => write!(f, "{e}"),
             RustType::Dyn(tr, marker_bounds) => {
                 write!(f, "dyn {tr}")?;
                 for mb in marker_bounds {

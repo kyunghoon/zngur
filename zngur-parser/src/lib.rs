@@ -5,9 +5,7 @@ use chumsky::prelude::*;
 use itertools::{Either, Itertools};
 
 use zngur_def::{
-    LayoutPolicy, Mutability, PrimitiveRustType, RustPathAndGenerics, RustTrait, RustType,
-    ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl, ZngurFile, ZngurFn, ZngurMethod,
-    ZngurMethodDetails, ZngurMethodReceiver, ZngurTrait, ZngurType, ZngurWellknownTrait,
+    LayoutPolicy, Mutability, PrimitiveRustType, RustEnum, RustPathAndGenerics, RustTrait, RustType, ZngurConstructor, ZngurExternCppFn, ZngurExternCppImpl, ZngurFile, ZngurFn, ZngurMethod, ZngurMethodDetails, ZngurMethodReceiver, ZngurTrait, ZngurType, ZngurWellknownTrait
 };
 
 pub type Span = SimpleSpan<usize>;
@@ -74,6 +72,10 @@ enum ParsedItem<'a> {
     Trait {
         tr: ParsedRustTrait<'a>,
         methods: Vec<ParsedMethod<'a>>,
+    },
+    Enum {
+        path: ParsedPath<'a>,
+        selections: Vec<String>,
     },
     Fn(ParsedMethod<'a>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
@@ -349,6 +351,22 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                     },
                 );
             }
+            ParsedItem::Enum { path, selections } => {
+                r.types.push(ZngurType {
+                    ty: RustType::Enum(RustEnum { path: path.to_zngur(base) }),
+                    layout: LayoutPolicy::StackAllocated { size: 4, align: 4 },
+                    methods: vec![],
+                    wellknown_traits: vec![ZngurWellknownTrait::Copy],
+                    constructors: selections.into_iter().map(|name| ZngurConstructor {
+                        name: Some(name),
+                        inputs: vec![],
+                    }).collect::<Vec<_>>(),
+                    cpp_value: None,
+                    cpp_ref: None,
+                    rust_value: None,
+                    alias: None,
+                });
+            }
             ParsedItem::Fn(f) => {
                 let method = f.to_zngur(base);
                 r.funcs.push(ZngurFn {
@@ -592,6 +610,7 @@ enum Token<'a> {
     KwCrate,
     KwType,
     KwTrait,
+    KwEnum,
     KwFn,
     KwMut,
     KwConst,
@@ -609,6 +628,7 @@ impl<'a> Token<'a> {
             "mod" => Token::KwMod,
             "type" => Token::KwType,
             "trait" => Token::KwTrait,
+            "enum" => Token::KwEnum,
             "crate" => Token::KwCrate,
             "fn" => Token::KwFn,
             "mut" => Token::KwMut,
@@ -652,6 +672,7 @@ impl Display for Token<'_> {
             Token::KwCrate => write!(f, "crate"),
             Token::KwType => write!(f, "type"),
             Token::KwTrait => write!(f, "trait"),
+            Token::KwEnum => write!(f, "enum"),
             Token::KwFn => write!(f, "fn"),
             Token::KwMut => write!(f, "mut"),
             Token::KwConst => write!(f, "const"),
@@ -1120,6 +1141,21 @@ fn trait_item<'a>(
         .map(|(tr, methods)| ParsedItem::Trait { tr, methods })
 }
 
+fn enum_item<'a>(
+) -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, extra::Err<Rich<'a, Token<'a>, Span>>> + Clone
+{
+    just(Token::KwEnum)
+        .ignore_then(path())
+        .then(
+            select! { Token::Ident(c) => c.to_owned() }
+                .separated_by(just(Token::Comma))
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
+                .or(empty().to(vec![]))
+        )
+        .map(|(path, selections)| ParsedItem::Enum { path, selections })
+}
+
 fn fn_item<'a>(
 ) -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, extra::Err<Rich<'a, Token<'a>, Span>>> + Clone
 {
@@ -1199,6 +1235,7 @@ fn item<'a>(
             .map(|(path, items)| ParsedItem::Mod { path, items })
             .or(type_item())
             .or(trait_item())
+            .or(enum_item())
             .or(extern_cpp_item())
             .or(fn_item())
             .or(additional_include_item())

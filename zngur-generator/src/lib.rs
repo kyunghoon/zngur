@@ -64,6 +64,7 @@ impl ZngurGenerator {
             }
             let mut cpp_methods = vec![];
             let mut constructors = vec![];
+            let mut alternates = vec![];
             let mut wellknown_traits = vec![];
             for constructor in ty_def.constructors {
                 match constructor.name {
@@ -91,6 +92,7 @@ impl ZngurGenerator {
                                 output: CppType::from("uint8_t"),
                             },
                         });
+                        alternates.push(name);
                     }
                     None => {
                         let rust_link_name = rust_file
@@ -151,6 +153,7 @@ impl ZngurGenerator {
                 ty: ty_def.ty.into_cpp(),
                 layout: rust_file.add_layout_policy_shim(&ty_def.ty, ty_def.layout),
                 constructors,
+                alternates,
                 methods: cpp_methods,
                 wellknown_traits,
                 cpp_value: ty_def.cpp_value.map(|(field, cpp_type)| {

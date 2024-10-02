@@ -101,6 +101,7 @@ impl Display for CppPath {
 pub struct CppType {
     pub path: CppPath,
     pub generic_args: Vec<CppType>,
+    pub is_enum: bool,
 }
 
 impl CppType {
@@ -108,6 +109,7 @@ impl CppType {
         CppType {
             path: CppPath::from("rust::Ref"),
             generic_args: vec![self],
+            is_enum: false,
         }
     }
 
@@ -194,12 +196,14 @@ impl From<&str> for CppType {
             None => CppType {
                 path: CppPath::from(value),
                 generic_args: vec![],
+                is_enum: false,
             },
             Some((path, generics)) => {
                 let generics = generics.strip_suffix('>').unwrap();
                 CppType {
                     path: CppPath::from(path),
                     generic_args: split_string(generics).map(|x| CppType::from(&*x)).collect(),
+                    is_enum: false,
                 }
             }
         }
@@ -580,6 +584,7 @@ pub struct CppTypeDefinition {
     pub from_trait: Option<RustTrait>,
     pub from_trait_ref: Option<RustTrait>,
     pub wellknown_traits: Vec<ZngurWellknownTraitData>,
+    pub alternates: Vec<String>,
     pub cpp_value: Option<(String, String)>,
     pub cpp_ref: Option<String>,
     pub alias: Option<RustType>,
@@ -593,6 +598,7 @@ impl Default for CppTypeDefinition {
             methods: vec![],
             constructors: vec![],
             wellknown_traits: vec![],
+            alternates: vec![],
             from_trait: None,
             from_trait_ref: None,
             cpp_value: None,
@@ -711,11 +717,15 @@ namespace rust {{
                 size = if is_unsized { 16 } else { 8 },
             )?;
         }
-        if let Some(cpp_ty) = &self.cpp_ref {
+        if let Some(cpp_ty) = self.cpp_ref.as_ref().map(|s| s.as_str())
+            .or_else(|| if self.alias.is_none() { self.cpp_value.as_ref().map(|(_, v)| v.as_str()) } else { None })
+        {
             if let Some(alias) = &self.alias {
                 write!(state, "\ntemplate<> struct __zngur__to_rust<{cpp_ty}> {{ typedef ::rust::{ty} type; }};", ty = alias)?;
+                write!(state, "\ntemplate<> struct __zngur__from_rust<::rust::{ty}> {{ typedef {cpp_ty} type; }};", ty = alias)?;
             } else {
                 write!(state, "\ntemplate<> struct __zngur__to_rust<{cpp_ty}> {{ typedef {ty} type; }};", ty = self.ty)?;
+                write!(state, "\ntemplate<> struct __zngur__from_rust<{ty}> {{ typedef {cpp_ty} type; }};", ty = self.ty)?;
             }
         }
         Ok(())
@@ -932,6 +942,7 @@ namespace rust {{
             }
             write!(state, "\n    }};")
         })?;
+
         let ty = &self.ty;
         if self.layout != CppLayoutPolicy::OnlyByRef {
             match &self.layout {
@@ -976,7 +987,61 @@ namespace rust {{
 }}"#,
             )?;
         }
-        self.emit_ref_specialization(state)
+        self.emit_ref_specialization(state)?;
+
+        if self.ty.is_enum {
+            write!(state, r#"
+template<> struct ToRust<{ty}::Type> {{
+    typedef {path} type;
+    static inline {path} to_rust({ty}::Type t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
+
+            for (n, name) in self.alternates.iter().enumerate() {
+                if n == 0 {
+                    write!(state, "\n        if ")?;
+                } else if n == self.alternates.len() - 1 {
+                    write!(state, "\n        else ")?;
+                } else {
+                    write!(state, "\n        else if ")?;
+                }
+                if n < self.alternates.len() - 1 {
+                    write!(state, "(t == {ty}::{name}) return {path}::{name}();", ty = self.ty.path.name(), path = self.ty.path)?;
+                } else {
+                    write!(state, "return {path}::{name}();", path = self.ty.path)?;
+                }
+            }
+
+            write!(state, r#"
+    }}
+}};
+template<> struct FromRust<::rust::Ref<{path}>> {{
+    typedef {ty}::Type type;
+    static inline {ty}::Type from_rust(::rust::Ref<{path}> const& t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
+
+            for (n, name) in self.alternates.iter().enumerate() {
+                if n == 0 {
+                    write!(state, "\n        if ")?;
+                } else if n == self.alternates.len() - 1 {
+                    write!(state, "\n        else ")?;
+                } else {
+                    write!(state, "\n        else if ")?;
+                }
+                if n < self.alternates.len() - 1 {
+                    write!(state, "(t.matches_{name}()) return {ty}::{name};", ty = self.ty.path.name())?;
+                } else {
+                    write!(state, "return {ty}::{name};", ty = self.ty.path.name())?;
+                }
+            }
+
+            write!(state, r#"
+    }}
+}};
+template<> struct FromRust<{path}> : public FromRust<rust::Ref<{path}>> {{
+    static inline {ty}::Type from_rust({path} const& t) {{ return FromRust<rust::Ref<{path}>>::from_rust(t); }}
+}};
+"#, ty = self.ty.path.name(), path = self.ty.path)?;
+        }
+
+        std::fmt::Result::Ok(())
     }
 
     fn emit_cpp_fn_defs(
@@ -1335,7 +1400,12 @@ impl CppFile {
             ""
         };
         state.text += r#"
+
+template<typename T> struct FromRust {};
+template<typename T> struct ToRust {};
+
 template<typename T> struct __zngur__to_rust { typedef T type; };
+template<typename T> struct __zngur__from_rust { typedef T type; };
 
 namespace rust {
     template<typename T> uint8_t* __zngur_internal_data_ptr(const T& t);

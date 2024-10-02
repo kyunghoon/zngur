@@ -29,6 +29,17 @@ impl IntoCpp for RustPathAndGenerics {
                 .chain(named_generics)
                 .map(|x| x.into_cpp())
                 .collect(),
+            is_enum: false,
+        }
+    }
+}
+
+impl IntoCpp for RustEnum {
+    fn into_cpp(&self) -> CppType {
+        CppType {
+            path: CppPath::from_rust_path(&self.path),
+            generic_args: vec![],
+            is_enum: true,
         }
     }
 }
@@ -48,6 +59,7 @@ impl IntoCpp for RustTrait {
                     .chain(Some(&**output))
                     .map(|x| x.into_cpp())
                     .collect(),
+                is_enum: false,
             },
         }
     }
@@ -92,6 +104,7 @@ impl IntoCpp for RustType {
             RustType::Boxed(t) => CppType {
                 path: CppPath::from("rust::Box"),
                 generic_args: vec![t.into_cpp()],
+                is_enum: false,
             },
             RustType::Ref(m, t, _) => CppType {
                 path: match m {
@@ -99,12 +112,15 @@ impl IntoCpp for RustType {
                     Mutability::Not => CppPath::from("rust::Ref"),
                 },
                 generic_args: vec![t.into_cpp()],
+                is_enum: false,
             },
             RustType::Slice(s) => CppType {
                 path: CppPath::from("rust::Slice"),
                 generic_args: vec![s.into_cpp()],
+                is_enum: false,
             },
             RustType::Raw(_, _) => todo!(),
+            RustType::Enum(e) => e.into_cpp(),
             RustType::Adt(pg) => pg.into_cpp(),
             RustType::Tuple(v) => {
                 if v.is_empty() {
@@ -113,6 +129,7 @@ impl IntoCpp for RustType {
                 CppType {
                     path: CppPath::from("rust::Tuple"),
                     generic_args: v.into_iter().map(|x| x.into_cpp()).collect(),
+                    is_enum: false,
                 }
             }
             RustType::Dyn(tr, marker_bounds) => {
@@ -127,6 +144,7 @@ impl IntoCpp for RustType {
                                 .map(|x| CppType::from(&*format!("rust::{x}"))),
                         )
                         .collect(),
+                    is_enum: false,
                 }
             }
         }
