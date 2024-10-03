@@ -11,9 +11,8 @@ template <typename T> using RmDyn = rust::RefMut<rust::Dyn<T>>;
 using namespace rust::crate;
 
 class CppPrintOnDropHolder : public PrintOnDropConsumer {
-  rust::Unit consume(PrintOnDrop p) override {
+  void consume(PrintOnDrop p) override {
     item = std::move(p);
-    return {};
   }
 
   PrintOnDrop item;

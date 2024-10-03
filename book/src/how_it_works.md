@@ -246,7 +246,7 @@ void __zngur_crate_BlobStoreTrait_s13_tag(uint8_t *data, uint8_t *i0,
                                           uint8_t *i1, uint8_t *o) {
   ::rust::crate::BlobStoreTrait *data_typed =
       reinterpret_cast<::rust::crate::BlobStoreTrait *>(data);
-  ::rust::Unit oo =
+  ::rust::Unit oo;
       data_typed->tag(::rust::__zngur_internal_move_from_rust<::uint64_t>(i0),
                       ::rust::__zngur_internal_move_from_rust<
                           ::rust::Ref<::rust::core::primitive::str>>(i1));

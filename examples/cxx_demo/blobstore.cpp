@@ -39,10 +39,9 @@ public:
     return blob_id;
   }
 
-  rust::Unit tag(::uint64_t blob_id,
+  void tag(::uint64_t blob_id,
                  rust::Ref<rust::core::primitive::str> tag) override {
     impl.blobs[blob_id].tags.emplace((char *)tag.as_ptr(), tag.len());
-    return rust::Unit{};
   }
 
   rust::crate::BlobMetadata metadata(::uint64_t blob_id) override {

@@ -84,7 +84,3 @@ if (reserve_capacity) {
 If `Vec<int32_t> v` used the default constructor, it would be a waste call to itself and a wasted call to the drop code
 executed immediately after that. Rust also support this, but checks the initialization before usage, which Zngur can't check in the
 compile time, but will check in the run time by default.
-
-### Rust functions returning `()` return `rust::Unit` in C++ instead of `void`
-
-This one has very little practical benefits, and might be revisited in future.

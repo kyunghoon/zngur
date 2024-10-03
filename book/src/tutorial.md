@@ -485,16 +485,14 @@ Inventory rust::Impl<Inventory>::new_empty(uint32_t space) {
       rust::ZngurCppOpaqueOwnedObject::build<cpp_inventory::Inventory>(space));
 }
 
-rust::Unit rust::Impl<Inventory>::add_banana(rust::RefMut<Inventory> self,
+void rust::Impl<Inventory>::add_banana(rust::RefMut<Inventory> self,
                                              uint32_t count) {
   self.cpp().add_banana(count);
-  return {};
 }
 
-rust::Unit rust::Impl<Inventory>::add_item(rust::RefMut<Inventory> self,
+void rust::Impl<Inventory>::add_item(rust::RefMut<Inventory> self,
                                            Item item) {
   self.cpp().add_item(item.cpp());
-  return {};
 }
 
 Item rust::Impl<Item>::new_(rust::Ref<rust::Str> name, uint32_t size) {

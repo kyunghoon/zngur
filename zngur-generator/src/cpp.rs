@@ -53,6 +53,10 @@ impl CppPath {
         self.0.split_last().unwrap().0
     }
 
+    fn is_unit(&self) -> bool {
+        self.0 == ["rust", "Unit"]
+    }
+
     fn need_header(&self) -> bool {
         self.0.first().map(|x| x.as_str()) == Some("rust")
             && self.0 != ["rust", "Unit"]
@@ -111,6 +115,10 @@ impl CppType {
             generic_args: vec![self],
             is_enum: false,
         }
+    }
+
+    pub fn is_void(&self) -> bool {
+        self.path.is_unit() && self.generic_args.is_empty() && !self.is_enum
     }
 
     fn emit_specialization_decl(&self, state: &mut State) -> std::fmt::Result {
@@ -746,7 +754,7 @@ namespace rust {{
             ty = self.ty,
         )?;
         self.ty.path.emit_in_namespace(state, |state| {
-            if self.ty.path.0 == ["rust", "Unit"] {
+            if self.ty.path.is_unit() {
                 write!(state, "\n{}template<> struct Tuple<> {{ ::std::array<::uint8_t, 1> data; }};", state.indent())?;
                 return Ok(());
             } else {
@@ -1526,7 +1534,10 @@ namespace rust {
         }
         for func in &self.exported_fn_defs {
             write!(state, "\nnamespace rust {{ namespace exported_functions {{")?;
-            write!(state, "\n   {} {}(", func.sig.output, func.name)?;
+            write!(state, "\n   {} {}(",
+                if func.sig.output.is_void() { "void".to_string() } else { format!("{}", func.sig.output) },
+                func.name
+            )?;
             for (n, ty) in func.sig.inputs.iter().enumerate() {
                 if n != 0 {
                     write!(state, ", ")?;
@@ -1548,7 +1559,10 @@ namespace rust {{
                 }
             )?;
             for (name, sig) in &imp.methods {
-                write!(state, "\n       static {} {}(", sig.output, name)?;
+                write!(state, "\n       static {} {}(",
+                    if sig.output.is_void() { "void".to_string() } else { format!("{}", sig.output) },
+                    name
+                )?;
                 for (n, ty) in sig.inputs.iter().enumerate() {
                     if n != 0 {
                         write!(state, ", ")?;
@@ -1615,8 +1629,8 @@ namespace rust {{
             writeln!(state, "{{")?;
             writeln!(
                 state,
-                "   {} oo = ::rust::exported_functions::{}({});",
-                func.sig.output,
+                "   {}::rust::exported_functions::{}({});",
+                if func.sig.output.path.is_unit() { format!("{} oo; ", func.sig.output) } else { format!("{} oo = ", func.sig.output) },
                 func.name,
                 func.sig
                     .inputs
@@ -1637,8 +1651,8 @@ namespace rust {{
                 writeln!(state, "{{")?;
                 writeln!(
                     state,
-                    "   {} oo = ::rust::Impl<{}, {}>::{}({});",
-                    sig.output,
+                    "   {}::rust::Impl<{}, {}>::{}({});",
+                    if sig.output.path.is_unit() { format!("{} oo; ", sig.output) } else { format!("{} oo = ", sig.output) },
                     imp.ty,
                     match &imp.tr {
                         Some(x) => format!("{x}"),
@@ -1680,7 +1694,7 @@ namespace rust {{
             for (name, sig) in &imp.methods {
                 writeln!(state,
                     "{} {}rust::Impl<{}, {}>::{}({})",
-                    &sig.output,
+                    if sig.output.is_void() { "void".to_string() } else { format!("{}", sig.output) },
                     if !SIG_OUTPUT.load(Ordering::SeqCst) { "::" } else { "" },
                     imp.ty,
                     match &imp.tr {
