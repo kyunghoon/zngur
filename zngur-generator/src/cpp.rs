@@ -1479,24 +1479,25 @@ namespace rust {
         zngur_pretty_print<typename ::std::remove_reference<T>::type>(input);
         return ::std::forward<T>(input);
     }"#;
-        for ty in [8, 16, 32, 64]
+        for (ty, ok_for_android) in [8, 16, 32, 64]
             .into_iter()
-            .flat_map(|x| [format!("int{x}_t"), format!("uint{x}_t")])
+            .flat_map(|x| [(format!("int{x}_t"), true), (format!("uint{x}_t"), true)])
             .chain([8, 16, 32, 64].into_iter().flat_map(|x| {
                 [
-                    format!("::rust::Ref<int{x}_t>"),
-                    format!("::rust::Ref<uint{x}_t>"),
-                    format!("::rust::RefMut<int{x}_t>"),
-                    format!("::rust::RefMut<uint{x}_t>"),
+                    (format!("::rust::Ref<int{x}_t>"), true),
+                    (format!("::rust::Ref<uint{x}_t>"), true),
+                    (format!("::rust::RefMut<int{x}_t>"), true),
+                    (format!("::rust::RefMut<uint{x}_t>"), true),
                 ]
             }))
             .chain([
-                "::rust::ZngurCppOpaqueOwnedObject".to_string(),
-                "::double_t".to_string(),
-                "::float_t".to_string(),
-                "unsigned long".to_string(),
+                ("::rust::ZngurCppOpaqueOwnedObject".to_string(), true),
+                ("::double_t".to_string(), true),
+                ("::float_t".to_string(), true),
+                ("unsigned long".to_string(), false),
             ])
         {
+          if !ok_for_android { write!(state, "\n#if !PLATFORM_ANDROID\n")?; }
             write!(state, r#"
     template<> inline uint8_t* __zngur_internal_data_ptr<{ty}>(const {ty}& t) {{ return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&t)); }}
     template<> inline void __zngur_internal_assume_init<{ty}>({ty}&) {{}}
@@ -1524,6 +1525,7 @@ namespace rust {
         size_t data;
         friend uint8_t* ::rust::__zngur_internal_data_ptr<RefMut<{ty}>>(const ::rust::RefMut<{ty}>& t);
     }};"#)?;
+            if !ok_for_android { write!(state, "\n#endif // !PLATFORM_ANDROID\n")?; }
         }
         writeln!(state, "}}")?;
 
