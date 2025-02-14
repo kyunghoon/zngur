@@ -66,8 +66,8 @@ impl Zngur {
             .unwrap()
             .write_all(rust.as_bytes())
             .unwrap();
-        File::create(h_file_path)
-            .unwrap()
+        File::create(&h_file_path)
+            .expect(&format!("failed to create file '{h_file_path:?}"))
             .write_all(h.as_bytes())
             .unwrap();
         if let Some(cpp) = cpp {
