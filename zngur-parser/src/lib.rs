@@ -1190,7 +1190,7 @@ fn extern_cpp_item<'a>(
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(Token::AngleOpen), just(Token::AngleClose)))
-    .or(just(Token::KwImpl).map(|_| vec!["poops"]));
+    .or(just(Token::KwImpl).map(|_| vec!["_noimpl"]));
     
     let impl_block = imp
         .then(

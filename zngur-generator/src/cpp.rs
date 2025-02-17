@@ -687,16 +687,38 @@ namespace rust {{
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
                 let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
-                write!(state, r#"
-        inline {cpp_ty}& cpp() {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
-                write!(state, r#"
-        inline {ref_kind}(const ::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>& t) : data(reinterpret_cast<size_t>(&t)), is_objref(true) {{ }}"#)?;
+                if ref_kind == "Ref" {
+                    write!(state, r#"
+            inline {cpp_ty}& cpp() {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
+                    //write!(state, r#"
+            //inline {cpp_ty} const& cpp() const {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}> const*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
+                    write!(state, r#"
+            inline {ref_kind}(const ::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>& t) : data(reinterpret_cast<size_t>(&t)), is_objref(true) {{ }}"#)?;
+                } else {
+                    write!(state, r#"
+            inline {cpp_ty} const& cpp() const {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}> const*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
+                    write!(state, r#"
+            inline {cpp_ty}& cpp() {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}>*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
+                    write!(state, r#"
+            inline {ref_kind}(::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}>& t) : data(reinterpret_cast<size_t>(&t)), is_objref(true) {{ }}"#)?;
+                }
             }
             if let Some(cpp_ty) = &self.cpp_ref {
-                write!(state, r#"
-        inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
-                write!(state, r#"
-        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
+                if ref_kind == "Ref" {
+                    write!(state, r#"
+            inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+            //         write!(state, r#"
+            // inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+                    write!(state, r#"
+            inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
+                } else {
+                    write!(state, r#"
+            inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+                    write!(state, r#"
+            inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+                    write!(state, r#"
+            inline {ref_kind}({cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
+                }
             }
             for method in &self.methods {
                 if let ZngurMethodReceiver::Ref(m, _) = method.kind {
@@ -1469,7 +1491,15 @@ namespace rust {
         T const& data;
     public:
         ZngurCppOpaqueOwnedObjectRef(T const& t) : data(t) {}
+        inline T const& as_cpp() const { return data; }
         inline T& as_cpp() { return const_cast<T&>(data); }
+    };
+    template<typename T> class ZngurCppOpaqueOwnedObjectRefMut {
+        T& data;
+    public:
+        ZngurCppOpaqueOwnedObjectRefMut(T& t) : data(t) {}
+        inline T& as_cpp() { return data; }
+        inline T const& as_cpp() const { return data; }
     };
     template<typename T> struct Ref;
     template<typename T> struct RefMut;
