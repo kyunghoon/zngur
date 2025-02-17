@@ -1022,12 +1022,14 @@ template<> struct ToRust<{ty}::Type> {{
     static inline {path} to_rust({ty}::Type t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
 
             for (n, name) in self.alternates.iter().enumerate() {
-                if n == 0 {
-                    write!(state, "\n        if ")?;
-                } else if n == self.alternates.len() - 1 {
-                    write!(state, "\n        else ")?;
-                } else {
-                    write!(state, "\n        else if ")?;
+                if self.alternates.len() > 1 {
+                    if n == 0 {
+                        write!(state, "\n        if ")?;
+                    } else if n == self.alternates.len() - 1 {
+                        write!(state, "\n        else ")?;
+                    } else {
+                        write!(state, "\n        else if ")?;
+                    }
                 }
                 if n < self.alternates.len() - 1 {
                     write!(state, "(t == {ty}::{name}) return {path}::{name}();", ty = self.ty.path.name(), path = self.ty.path)?;
@@ -1044,12 +1046,14 @@ template<> struct FromRust<::rust::Ref<{path}>> {{
     static inline {ty}::Type from_rust(::rust::Ref<{path}> const& t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
 
             for (n, name) in self.alternates.iter().enumerate() {
-                if n == 0 {
-                    write!(state, "\n        if ")?;
-                } else if n == self.alternates.len() - 1 {
-                    write!(state, "\n        else ")?;
-                } else {
-                    write!(state, "\n        else if ")?;
+                if self.alternates.len() > 1 {
+                    if n == 0 {
+                        write!(state, "\n        if ")?;
+                    } else if n == self.alternates.len() - 1 {
+                        write!(state, "\n        else ")?;
+                    } else {
+                        write!(state, "\n        else if ")?;
+                    }
                 }
                 if n < self.alternates.len() - 1 {
                     write!(state, "(t.matches_{name}()) return {ty}::{name};", ty = self.ty.path.name())?;
