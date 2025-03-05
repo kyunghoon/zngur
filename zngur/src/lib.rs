@@ -60,22 +60,25 @@ impl Zngur {
         let file = ZngurGenerator::build_from_zng(ParsedZngFile::parse("main.zng", &file));
 
         let (rust, h, cpp) = file.render();
-        let rs_file_path = self.rs_file_path.expect("No rs file path provided");
-        let h_file_path = self.h_file_path.expect("No h file path provided");
-        File::create(rs_file_path)
-            .unwrap()
-            .write_all(rust.as_bytes())
-            .unwrap();
-        File::create(&h_file_path)
-            .expect(&format!("failed to create file '{h_file_path:?}"))
-            .write_all(h.as_bytes())
-            .unwrap();
-        if let Some(cpp) = cpp {
-            let cpp_file_path = self.cpp_file_path.expect("No cpp file path provided");
-            File::create(cpp_file_path)
+        if let Some(rs_file_path) = self.rs_file_path {
+            File::create(rs_file_path)
                 .unwrap()
-                .write_all(cpp.as_bytes())
+                .write_all(rust.as_bytes())
                 .unwrap();
+        }
+        if let Some(h_file_path) = self.h_file_path {
+            File::create(&h_file_path)
+                .expect(&format!("failed to create file '{h_file_path:?}"))
+                .write_all(h.as_bytes())
+                .unwrap();
+        }
+        if let Some(cpp) = cpp {
+            if let Some(cpp_file_path) = self.cpp_file_path {
+                File::create(cpp_file_path)
+                    .unwrap()
+                    .write_all(cpp.as_bytes())
+                    .unwrap();
+            }
         }
     }
 }
