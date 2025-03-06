@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::{borrow::Cow, fmt::Write};
 
 use itertools::Itertools;
 
@@ -8,6 +8,16 @@ use crate::{
 };
 
 use zngur_def::*;
+
+#[cfg(not(feature="edition-2024"))]
+const NO_MANGLE: &'static str = "#[no_mangle]";
+#[cfg(feature="edition-2024")]
+const NO_MANGLE: &'static str = "#[unsafe(no_mangle)]";
+
+#[cfg(not(feature="edition-2024"))]
+const EXTERN_C: &'static str = "extern \"C\"";
+#[cfg(feature="edition-2024")]
+const EXTERN_C: &'static str = "unsafe extern \"C\"";
 
 pub trait IntoCpp {
     fn into_cpp(&self) -> CppType;
@@ -294,7 +304,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         assert!(matches!(tr.tr, RustTrait::Normal { .. }));
         let mut method_mangled_name = vec![];
         w!(self, r#"
-extern "C" {{"#);
+{EXTERN_C} {{"#);
         for method in &tr.methods {
             let name = mangle_name(&tr.tr.to_string()) + "_" + &method.name;
             w!(self, r#"
@@ -338,7 +348,7 @@ extern "C" {{"#);
         let (trait_without_assocs, assocs) = tr.tr.clone().take_assocs();
         let mangled_name = mangle_name(&trait_name);
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), o: *mut u8) {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), o: *mut u8) {{
     struct Wrapper {{ value: ZngurCppOpaqueOwnedObject }}
     impl {trait_without_assocs} for Wrapper {{
 "#
@@ -394,7 +404,7 @@ extern "C" {{"#);
         let (trait_without_assocs, assocs) = tr.tr.clone().take_assocs();
         let mangled_name = mangle_name(&trait_name) + "_borrowed";
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {mangled_name}(data: *mut u8, o: *mut u8) {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, o: *mut u8) {{
     struct Wrapper(ZngurCppOpaqueBorrowedObject);
     impl {trait_without_assocs} for Wrapper {{"#);
         for (name, ty) in assocs {
@@ -446,7 +456,7 @@ extern "C" {{"#);
         let mangled_name = mangle_name(&inputs.iter().chain(Some(output)).join(", "));
         let trait_str = format!("{name}({}) -> {output}", inputs.iter().join(", "));
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
     let this = unsafe {{ ZngurCppOpaqueOwnedObject::new(data, destructor) }};
     let r: Box<dyn {trait_str}> = Box::new(move |{}| unsafe {{
         _ = &this;
@@ -477,7 +487,7 @@ extern "C" {{"#);
     pub fn add_tuple_constructor(&mut self, fields: &[RustType]) -> String {
         let constructor = mangle_name(&fields.iter().join("&"));
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {constructor}("#);
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {constructor}("#);
         for name in 0..fields.len() {
             w!(self, "f_{name}: *mut u8, ");
         }
@@ -498,7 +508,7 @@ extern "C" {{"#);
         let constructor = mangle_name(rust_name);
         let match_check = format!("{constructor}_check");
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {constructor}("#);
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {constructor}("#);
         for (name, _) in args {
             w!(self, "f_{name}: *mut u8, ");
         }
@@ -511,7 +521,7 @@ extern "C" {{"#);
         }
         w!(self, "}}) }} }}");
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {match_check}(i: *mut u8, o: *mut u8) {{ unsafe {{ *o = matches!(&*(i as *mut &_), {rust_name} {{ .. }}) as u8; }} }}"#);
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {match_check}(i: *mut u8, o: *mut u8) {{ unsafe {{ *o = matches!(&*(i as *mut &_), {rust_name} {{ .. }}) as u8; }} }}"#);
         ConstructorMangledNames {
             constructor,
             match_check,
@@ -621,7 +631,7 @@ impl {owner}{owner_lts} {{"#,
     ) -> String {
         let mangled_name = mangle_name(rust_name);
         w!(self, r#"
-extern "C" {{ fn {mangled_name}("#
+{EXTERN_C} {{ fn {mangled_name}("#
         );
         for (n, _) in inputs.iter().enumerate() {
             w!(self, "i{n}: *mut u8, ");
@@ -644,7 +654,7 @@ pub(crate) fn {rust_name}("#
     pub fn add_cpp_value_bridge(&mut self, ty: &RustType, field: &str) -> String {
         let mangled_name = mangle_name(&format!("{ty}_cpp_value_{field}"));
         w!(self, r#"
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{ unsafe {{ &mut (*(d as *mut {ty})).{field} }} }}"#);
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{ unsafe {{ &mut (*(d as *mut {ty})).{field} }} }}"#);
         mangled_name
     }
 
@@ -656,7 +666,7 @@ pub(crate) fn {rust_name}("#
         use_path: Option<Vec<String>>,
         deref: bool,
     ) -> String {
-        let mangle = if self.hotreload { "" } else { "#[no_mangle]\n" };
+        let mangle = if self.hotreload { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
         let public = if self.hotreload { "" } else { "pub " };
         let mut mangled_name = mangle_name(rust_name);
         if deref {
@@ -699,7 +709,7 @@ pub(crate) fn {rust_name}("#
         ty: &RustType,
         wellknown_trait: ZngurWellknownTrait,
     ) -> ZngurWellknownTraitData {
-        let mangle = if self.hotreload { "" } else { "#[no_mangle]\n" };
+        let mangle = if self.hotreload { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
         let public = if self.hotreload { "" } else { "pub " };
         match wellknown_trait {
             ZngurWellknownTrait::Unsized => ZngurWellknownTraitData::Unsized,
@@ -730,7 +740,7 @@ pub(crate) fn {rust_name}("#
 thread_local! {{
             pub static PANIC_PAYLOAD: ::std::cell::Cell<Option<()>> = ::std::cell::Cell::new(None);
         }}
-        #[allow(non_snake_case)] #[no_mangle] pub fn __zngur_detect_panic() -> u8 {{
+        #[allow(non_snake_case)] {NO_MANGLE} pub fn __zngur_detect_panic() -> u8 {{
             PANIC_PAYLOAD.with(|p| {{
                 let pp = p.take();
                 let r = if pp.is_some() {{ 1 }} else {{ 0 }};
@@ -738,7 +748,7 @@ thread_local! {{
                 r
             }})
         }}
-        #[allow(non_snake_case)] #[no_mangle] pub fn __zngur_take_panic() {{ PANIC_PAYLOAD.with(|p| {{ p.take(); }}) }}"#);
+        #[allow(non_snake_case)] {NO_MANGLE} pub fn __zngur_take_panic() {{ PANIC_PAYLOAD.with(|p| {{ p.take(); }}) }}"#);
         self.panic_to_exception = true;
     }
 
@@ -770,9 +780,9 @@ thread_local! {{
                 let alloc_fn = mangle_name(&format!("{ty}_alloc_fn"));
                 let free_fn = mangle_name(&format!("{ty}_free_fn"));
                 w!(self, r#"
-                #[allow(non_snake_case)] #[no_mangle] pub fn {size_fn}() -> usize {{ ::std::mem::size_of::<{ty}>() }}
-                #[allow(non_snake_case)] #[no_mangle] pub fn {alloc_fn}() -> *mut u8 {{ unsafe {{ ::std::alloc::alloc(::std::alloc::Layout::new::<{ty}>()) }} }}
-                #[allow(non_snake_case)] #[no_mangle] pub fn {free_fn}(p: *mut u8) {{ unsafe {{ ::std::alloc::dealloc(p, ::std::alloc::Layout::new::<{ty}>()) }} }}"#);
+                #[allow(non_snake_case)] {NO_MANGLE} pub fn {size_fn}() -> usize {{ ::std::mem::size_of::<{ty}>() }}
+                #[allow(non_snake_case)] {NO_MANGLE} pub fn {alloc_fn}() -> *mut u8 {{ unsafe {{ ::std::alloc::alloc(::std::alloc::Layout::new::<{ty}>()) }} }}
+                #[allow(non_snake_case)] {NO_MANGLE} pub fn {free_fn}(p: *mut u8) {{ unsafe {{ ::std::alloc::dealloc(p, ::std::alloc::Layout::new::<{ty}>()) }} }}"#);
                 CppLayoutPolicy::HeapAllocated {
                     size_fn,
                     alloc_fn,
@@ -853,7 +863,7 @@ thread_local! {{
 }}
 static CAPI: std::sync::OnceLock<ZngurCApi> = std::sync::OnceLock::new();
 #[allow(dead_code)] #[allow(non_snake_case)] fn GetZngurCApi() -> &'static ZngurCApi {{ CAPI.get().expect("zngur capi not initialized") }}
-#[allow(non_snake_case)] #[no_mangle] pub extern "C" fn GetZngurRsApi(capi: ZngurCApi) -> ZngurRsApi {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn GetZngurRsApi(capi: ZngurCApi) -> ZngurRsApi {{
     CAPI.get_or_init(|| capi);
     ZngurRsApi {{"#);
         if cpp_file.fn_defs.is_empty() && cpp_file.type_defs.is_empty() && cpp_file.trait_defs.is_empty() {

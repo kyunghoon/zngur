@@ -11,6 +11,7 @@ license.workspace = true
 [features]
 hotreload = []
 std-namespace-fix = []
+edition-2024 = []
 
 [dependencies]
 itertools = "0.11"
