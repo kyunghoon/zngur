@@ -8,6 +8,7 @@ members = [
     "zngur-autozng",
     "examples/*",
     "xtask",
+    "zgen"
 ]
 resolver = "2"
 

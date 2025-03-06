@@ -1453,8 +1453,8 @@ impl CppFile {
         };
         state.text += r#"
 
-template<typename T> struct FromRust {};
-template<typename T> struct ToRust {};
+template<typename T, typename Enable = void> struct FromRust {};
+template<typename T, typename Enable = void> struct ToRust {};
 
 template<typename T> struct __zngur__to_rust { typedef T type; };
 template<typename T> struct __zngur__from_rust { typedef T type; };
