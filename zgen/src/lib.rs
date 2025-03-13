@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::BTreeMap};
 use zngur::{ParseMode, Parser};
 use proc_macro2::Span;
 use proc_macro::TokenStream;
@@ -29,7 +29,7 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut full_rs_debug_output_path = None;
     let mut full_rs_output_path = None;
     let mut additional_includes = vec![];
-    let mut prelude_types = HashMap::new();
+    let mut prelude_types = BTreeMap::new();
     let mut disabled = false;
     for arg in &args {
         if let Meta::NameValue(name_value) = arg {
@@ -122,7 +122,6 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     });
-
 
     if let Some(path) = &full_rs_debug_output_path {
         let items = items.clone();
