@@ -2,10 +2,12 @@
 //! about the Zngur itself, see [the documentation](https://hkalbasi.github.io/zngur).
 
 mod parser;
+mod types;
 mod instantiate;
+mod cppwriter;
 
 use std::{
-    borrow::Cow, collections::HashMap, fs::File, io::Write, path::{Path, PathBuf}
+    borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::{Path, PathBuf}
 };
 
 use proc_macro2::{Span, TokenStream};
@@ -13,7 +15,8 @@ use syn::{parse_quote, Expr, ExprLit, ExprTuple, Ident, Item, ItemMod, Lit};
 use zngur_generator::{ParsedZngFile, ZngurGenerator};
 use quote::{quote, ToTokens};
 
-pub use parser::{Parser, CppWriter, ParseMode};
+pub use parser::{Parser, ParseMode};
+pub use cppwriter::CppWriter;
 
 #[derive(Debug)]
 pub struct Error(pub Span, pub Cow<'static, str>);
@@ -111,7 +114,7 @@ impl Zngur {
                 Some(Ident::new(&s.value(), Span::call_site()))
             }).collect::<Option<Vec<_>>>()?;
             Some((key, vals))
-        }).collect::<Option<HashMap<_, _>>>() else {
+        }).collect::<Option<BTreeMap<_, _>>>() else {
             panic!("failed to parse prelude_types");
         };
 
