@@ -1108,7 +1108,7 @@ impl Parser {
                                         Ok(())
                                     }
                                     _ => Ok(())
-                                }).collect::<Result<_>>()?;
+                                }).collect::<Result<()>>()?;
                                 let trait_id = Ident::new(&(ident.to_string() + "Trait"), Span::call_site());
                                 let trait_: ItemTrait = parse_quote!{ pub trait #trait_id<'a> { #(#trait_fns)* } };
                                 self.bind_traits.push(trait_);
