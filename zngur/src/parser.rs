@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, HashMap, HashSet}, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, HashMap, HashSet}, rc::Rc};
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
@@ -279,7 +279,7 @@ pub struct Parser {
     )>>,
     impls: HashMap<Vec<String>, ItemImpl>,
     structs_that_bind: HashMap<Ident, Path>,
-    prelude_types: HashMap<Ident, Vec<Ident>>,
+    prelude_types: Rc<BTreeMap<Ident, Vec<Ident>>>,
     cpp_writer: Option<CppWriter>,
     zng_writer: ZngWriter,
     specializations: HashMap<Ident, HashSet<Specialization>>,
@@ -288,17 +288,17 @@ pub struct Parser {
     bind_traits: Vec<ItemTrait>,
 }
 impl Parser {
-    pub fn new(additional_includes: &Vec<String>, prelude_types: HashMap<Ident, Vec<Ident>>) -> Self {
+    pub fn new(additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>) -> Self {
         Self::with_details(false, additional_includes, prelude_types, false, ParseMode::Generate)
     }
-    pub fn with_details(has_generated: bool, additional_includes: &Vec<String>, prelude_types: HashMap<Ident, Vec<Ident>>, skip_artifacts: bool, mode: ParseMode) -> Self {
+    pub fn with_details(has_generated: bool, additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>, skip_artifacts: bool, mode: ParseMode) -> Self {
         let mut ret = Self {
             has_generated,
             n: 0,
             modstack: RefCell::new(vec![]),
             impls: Default::default(),
             structs_that_bind: Default::default(),
-            prelude_types,
+            prelude_types: Rc::new(prelude_types),
             cpp_writer: None,
             zng_writer: ZngWriter::new(skip_artifacts),
             specializations: Default::default(),
@@ -315,25 +315,7 @@ impl Parser {
         ret
     }
     pub fn set_cpp_writer(&mut self, mut writer: CppWriter) {
-        let mut preludes = self.prelude_types.iter().filter_map(|(_, modpath)| {
-            let mut mi = modpath.iter();
-            match mi.next() {
-                Some(f) => {
-                    let rest = mi.map(|i| i.to_string()).collect::<Vec<_>>().join("::");
-                    let first = if f == "std" { Cow::Borrowed("std_") } else { Cow::Owned(f.to_string()) };
-                    if rest.is_empty() {
-                        Some(format!("{}", first))
-                    } else {
-                        Some(format!("{}::{}", first, rest))
-                    }
-                }
-                None => None,
-            }
-        }).collect::<Vec<_>>();
-        preludes.sort();
-        for p in preludes {
-            writer.lines.push(format!("    using namespace {};", p));
-        }
+        writer.prelude_types =self.prelude_types.clone();
         self.cpp_writer = Some(writer);
     }
     pub fn take_cpp_writer(&mut self) -> Option<CppWriter> { self.cpp_writer.take() }
@@ -1426,25 +1408,20 @@ impl Parser {
 pub struct CppWriter {
     lines: Vec<String>,
     dupcheck: HashSet<(Option<Ident>, Ident)>,
+    prelude_types: Rc<BTreeMap<Ident, Vec<Ident>>>,
 }
 impl CppWriter {
-    pub fn new() -> Self {
-        let mut ret = Self {
-            lines: vec![],
-            dupcheck: Default::default(),
-        };
-        ret.lines.append(&mut [
-            "namespace rust {",
-            "    using namespace crate;"
-        ].into_iter().map(|s| s.to_string()).collect());
-        ret
-    }
+    pub fn new() -> Self { Self {
+        lines: vec![],
+        dupcheck: Default::default(),
+        prelude_types: Rc::new(Default::default()),
+    } }
     fn add_line(&mut self, modpath: Vec<String>, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature, line: impl ToString) {
         let key = (self_ident.cloned(), sig.ident.clone());
         if self.dupcheck.contains(&key) { return };
         self.dupcheck.insert(key);
 
-        let cpp_sig = Self::cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
+        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
         self.lines.push(format!("{}", cpp_sig));
 
         self.lines.push(line.to_string());
@@ -1455,21 +1432,45 @@ impl CppWriter {
         if self.dupcheck.contains(&key) { return };
         self.dupcheck.insert(key);
 
-        let cpp_sig = Self::cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
+        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
         self.lines.push(format!("{}", cpp_sig));
 
         self.lines.append(&mut lines.into_iter().map(|c| c.to_string()).collect());
         self.lines.push("}".to_string());
     }
     pub fn output(mut self) -> String {
-        self.lines.append(&mut [
+        let mut lines = vec![];
+        lines.append(&mut [
+            "namespace rust {",
+            "    using namespace crate;"
+        ].into_iter().map(|s| s.to_string()).collect());
+        let preludes = self.prelude_types.iter().filter_map(|(_, modpath)| {
+            let mut mi = modpath.iter();
+            match mi.next() {
+                Some(f) => {
+                    let rest = mi.map(|i| i.to_string()).collect::<Vec<_>>().join("::");
+                    let first = if f == "std" { Cow::Borrowed("std_") } else { Cow::Owned(f.to_string()) };
+                    if rest.is_empty() {
+                        Some(format!("{}", first))
+                    } else {
+                        Some(format!("{}::{}", first, rest))
+                    }
+                }
+                None => None,
+            }
+        }).collect::<Vec<_>>();
+        for p in preludes {
+            lines.push(format!("    using namespace {};", p));
+        }
+        lines.append(&mut self.lines);
+        lines.append(&mut [
             "}",
             //"// NOTE: when return RefMut/Ref, matching std::ref/std::cref must be used",
         ].into_iter().map(|s| s.to_string()).collect());
-        self.lines.join("\n")
+        lines.join("\n")
     }
-    fn cpp_sig(modpath: &String, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature) -> String {
-        struct Cpp<'a> { modpath: &'a String, self_ident: Option<&'a Ident> }
+    fn cpp_sig(&self, modpath: &String, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature) -> String {
+        struct Cpp<'a> { prelude_types: &'a BTreeMap<Ident, Vec<Ident>>, modpath: &'a String, self_ident: Option<&'a Ident> }
         impl<'a> Cpp<'a> {
             fn ident(&self, i: &Ident) -> String {
                 match i {
@@ -1523,7 +1524,8 @@ impl CppWriter {
                     None => {
                         let mut si = p.segments.iter();
                         match (si.next(), si.next()) {
-                            (Some(a), None) => self.path_segment(a),
+                            (Some(a), None) if self.prelude_types.contains_key(&a.ident) => self.path_segment(a),
+                            (Some(a), None) => format!("{}::{}", self.modpath, self.path_segment(a)),
                             (Some(a), Some(b)) if a.ident == "std" => {
                                 let rest = si.map(|s| self.path_segment(s)).collect::<Vec<_>>();
                                 if rest.is_empty() {
@@ -1570,7 +1572,7 @@ impl CppWriter {
             }
         }
 
-        let cpp = Cpp { modpath, self_ident };
+        let cpp = Cpp { prelude_types: &self.prelude_types, modpath, self_ident };
 
         let output = match &sig.output {
             ReturnType::Default => "void".to_string(),

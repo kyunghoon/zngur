@@ -5,7 +5,7 @@ mod parser;
 mod instantiate;
 
 use std::{
-    borrow::Cow, collections::HashMap, fs::File, io::Write, path::{Path, PathBuf}
+    borrow::Cow, collections::{BTreeMap, HashMap}, fs::File, io::Write, path::{Path, PathBuf}
 };
 
 use proc_macro2::{Span, TokenStream};
@@ -111,7 +111,7 @@ impl Zngur {
                 Some(Ident::new(&s.value(), Span::call_site()))
             }).collect::<Option<Vec<_>>>()?;
             Some((key, vals))
-        }).collect::<Option<HashMap<_, _>>>() else {
+        }).collect::<Option<BTreeMap<_, _>>>() else {
             panic!("failed to parse prelude_types");
         };
 
