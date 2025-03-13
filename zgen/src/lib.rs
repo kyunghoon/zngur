@@ -98,22 +98,6 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
         });
     }
 
-    if let Some(path) = &full_rs_debug_output_path {
-        let items = items.clone();
-        let ts = quote! {
-            #![allow(unused_variables)]
-            #(#items)* 
-        };
-        let file: syn::File = match syn::parse2(ts) {
-            Err(e) => return Error::new(e.span(), e.to_string().into()).into(),
-            Ok(f) => f,
-        };
-        let contents = prettyplease::unparse(&file);
-        if let Err(e) = write_to_file(&path, &contents) {
-            return Error::new(Span::call_site(), format!("failed to output rust: {}", e.to_string()).into()).into();
-        }
-    }
-
     items.push({
         let toks = item_orig.to_token_stream().to_string();
         let stmts = parser.needed_layouts().into_iter().map(|(ty, linenum, indent)| {
@@ -138,6 +122,23 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     });
+
+
+    if let Some(path) = &full_rs_debug_output_path {
+        let items = items.clone();
+        let ts = quote! {
+            #![allow(unused_variables)]
+            #(#items)* 
+        };
+        let file: syn::File = match syn::parse2(ts) {
+            Err(e) => return Error::new(e.span(), e.to_string().into()).into(),
+            Ok(f) => f,
+        };
+        let contents = prettyplease::unparse(&file);
+        if let Err(e) = write_to_file(&path, &contents) {
+            return Error::new(Span::call_site(), format!("failed to output rust: {}", e.to_string()).into()).into();
+        }
+    }
 
     quote! { #(#items)* }.into()
 }
