@@ -2,7 +2,7 @@ use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, HashMap, Ha
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse::Parse, parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, PatType, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItem, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParamBound, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, PatType, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItem, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParamBound, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
 use crate::instantiate::Instantiate;
 use super::{Result, Error};
 
@@ -362,6 +362,7 @@ impl Parser {
                 Type::Reference(TypeReference {
                     and_token,
                     lifetime: match (lts, lifetime) {
+                        (_, Some(lt)) if lt.ident == "static" =>  Some(lt),
                         (Some(list), Some(lt)) => 
                             if list.contains(&lt.ident) { Some(lt) } else { None },
                         _ => None,
