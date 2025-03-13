@@ -883,7 +883,7 @@ impl Parser {
         self.zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_meta_attributes(&mut self, ty_str: String, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<CppPassingStyle>, bool)> {
+    fn parse_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<CppPassingStyle>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
         let mut should_bind = false;
@@ -980,14 +980,12 @@ impl Parser {
             };
             meta.map(|meta| Attribute { pound_token, style, bracket_token, meta })
         })).filter_map(|a| a.transpose()).collect::<Result<_>>()?;
-        if needs_layout {
-            self.zng_writer.layout(ty_str);
-        }
-        Ok((ret, passing_style, should_bind))
+        Ok((ret, passing_style, should_bind, needs_layout))
     }
 
     fn parse_struct(&mut self, item: ItemStruct) -> Result<Option<ItemStruct>> {
         let ItemStruct { attrs, vis, struct_token, ident, generics, fields, semi_token } = item;
+        let has_generic_types = generics.type_params().peekable().next().is_some();
         let mut bind_id = None;
         let mut modpath = self.modpath();
         let (attrs, ident, passing_style, is_meta_type) = if ident == META_TYPE_NAME {
@@ -997,7 +995,10 @@ impl Parser {
             modpath.push(ty.to_token_stream().to_string());
             self.zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
             self.zng_writer.indent_level += 1;
-            let (attrs, passing_style, _) = self.parse_meta_attributes(ty.to_token_stream().to_string(), attrs)?;
+            let (attrs, passing_style, _, needs_layout) = self.parse_meta_attributes(attrs)?;
+            if needs_layout && !has_generic_types {
+                self.zng_writer.layout(ty.to_token_stream().to_string());
+            }
             if let Some(imp) = self.impls.remove(&modpath) {
                 let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                 for item in imp.items {
@@ -1011,7 +1012,10 @@ impl Parser {
             modpath.push(ident.to_token_stream().to_string());
             self.zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
             self.zng_writer.indent_level += 1;
-            let (attrs, passing_style, should_bind) = self.parse_meta_attributes(ident.to_string(), attrs)?;
+            let (attrs, passing_style, should_bind, needs_layout) = self.parse_meta_attributes(attrs)?;
+            if needs_layout && !has_generic_types {
+                self.zng_writer.layout(ident.to_string());
+            }
             if let Some(imp) = self.impls.remove(&modpath) {
                 let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                 match self.mode {
