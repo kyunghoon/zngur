@@ -8,6 +8,19 @@ use super::{Result, Error};
 
 const META_TYPE_NAME: &'static str = "_Type";
 
+enum WellKnown {
+    Sized,
+    Copy,
+}
+
+enum ZngurAttribute {
+    BindTo,
+    WellKnown(Vec<WellKnown>),
+    CppValue(MetaList),
+    RustValue(MetaList),
+    CppRef(MetaList),
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CppPassingStyle { Ref, Value }
 
@@ -779,18 +792,84 @@ impl ParseState {
         zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_meta_attributes(&mut self, zng_writer: &mut ZngWriter, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<CppPassingStyle>, bool, bool)> {
+    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: Vec<ZngurAttribute>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
         let mut should_bind = false;
-        let ret = attrs.into_iter().map(|attr| Ok({
+        for zattr in zng_attrs {
+            match zattr {
+                ZngurAttribute::BindTo => {
+                    should_bind = true;
+                },
+                ZngurAttribute::WellKnown(wellknown) => {
+                    for w in wellknown {
+                        match w {
+                            WellKnown::Sized => {
+                                zng_writer.wl(format!("wellknown_traits(?Sized);").into());
+                                needs_layout = false;
+                            }
+                            WellKnown::Copy => {
+                                zng_writer.wl(format!("wellknown_traits(Copy);").into());
+                            }
+                        }
+                    }
+                },
+                ZngurAttribute::CppValue(meta_list) => {
+                    zng_writer.wl("constructor(ZngurCppOpaqueOwnedObject);".into());
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid cpp_value token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
+                        return Err(Error::new(span, "invalid cpp_value token".into()))
+                    }; 
+                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                    passing_style = Some(CppPassingStyle::Value);
+                },
+                ZngurAttribute::RustValue(meta_list) => {
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid rust_value token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
+                        return Err(Error::new(span, "invalid rust_value token".into()))
+                    }; 
+                    zng_writer.wl(format!("#rust_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                },
+                ZngurAttribute::CppRef(meta_list) => {
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid cpp_ref token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Str(a)), None) = (ai.next(), ai.next()) else {
+                        return Err(Error::new(span, format!("invalid cpp_ref token").into()));
+                    };
+                    zng_writer.wl(format!("#cpp_ref \"{}\";", a.value()).into());
+                    needs_layout = false;
+                    passing_style = Some(CppPassingStyle::Ref);
+                },
+            }
+        }
+
+        Ok((passing_style, should_bind, needs_layout))
+    }
+    fn map_zngur_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<ZngurAttribute>)> {
+        let mut zng_attrs = vec![];
+        let attrs = attrs.into_iter().filter_map(|attr| {
             let Attribute { pound_token, style, bracket_token, meta } = attr;
             let meta = match meta {
                 Meta::List(meta_list) if meta_list.path.is_ident("bind_to") => {
-                    should_bind = true;
+                    zng_attrs.push(ZngurAttribute::BindTo);
                     None
                 }
                 Meta::List(mut meta_list) if meta_list.path.is_ident("wellknown") => {
+                    let mut wellknown = vec![];
                     meta_list.path = proc_macro2::Ident::new("derive", meta_list.path.span()).into();
                     let tokens = meta_list.tokens.to_token_stream().into_iter().collect::<Vec<_>>();
                     let mut found_index = None;
@@ -798,8 +877,7 @@ impl ParseState {
                         match (&toks[0], &toks[1]) {
                             (TokenTree::Punct(a), TokenTree::Ident(b)) if a.as_char() == '?' && b == "Sized" => {
                                 found_index = Some(n);
-                                zng_writer.wl(format!("wellknown_traits(?Sized);").into());
-                                needs_layout = false;
+                                wellknown.push(WellKnown::Sized);
                             }
                             _ => ()
                         }
@@ -814,7 +892,7 @@ impl ParseState {
                             match meta {
                                 Meta::Path(path) if path.is_ident("Copy") => {
                                     has_copy = true;
-                                    zng_writer.wl(format!("wellknown_traits(Copy);").into());
+                                    wellknown.push(WellKnown::Copy);
                                 }
                                 Meta::Path(path) if path.is_ident("Clone") => {
                                     has_clone = true;
@@ -827,56 +905,26 @@ impl ParseState {
                         }
                         meta_list.tokens = metas.to_token_stream();
                     }
+                    zng_attrs.push(ZngurAttribute::WellKnown(wellknown));
                     Some(Meta::List(meta_list))
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_value") => {
-                    zng_writer.wl("constructor(ZngurCppOpaqueOwnedObject);".into());
-                    let span = meta_list.span();
-                    let Ok(args) = meta_list.parse_args_with(
-                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
-                        return Err(Error::new(span, format!("invalid cpp_value token list").into()));
-                    };
-                    let mut ai = args.into_iter();
-                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
-                        return Err(Error::new(span, "invalid cpp_value token".into()))
-                    }; 
-                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
-                    passing_style = Some(CppPassingStyle::Value);
+                    zng_attrs.push(ZngurAttribute::CppValue(meta_list));
                     None
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("rust_value") => {
-                    let span = meta_list.span();
-                    let Ok(args) = meta_list.parse_args_with(
-                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
-                        return Err(Error::new(span, format!("invalid rust_value token list").into()));
-                    };
-                    let mut ai = args.into_iter();
-                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
-                        return Err(Error::new(span, "invalid rust_value token".into()))
-                    }; 
-                    zng_writer.wl(format!("#rust_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                    zng_attrs.push(ZngurAttribute::RustValue(meta_list));
                     None
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_ref") => {
-                    let span = meta_list.span();
-                    let Ok(args) = meta_list.parse_args_with(
-                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
-                        return Err(Error::new(span, format!("invalid cpp_ref token list").into()));
-                    };
-                    let mut ai = args.into_iter();
-                    let (Some(Lit::Str(a)), None) = (ai.next(), ai.next()) else {
-                        return Err(Error::new(span, format!("invalid cpp_ref token").into()));
-                    };
-                    zng_writer.wl(format!("#cpp_ref \"{}\";", a.value()).into());
-                    needs_layout = false;
-                    passing_style = Some(CppPassingStyle::Ref);
+                    zng_attrs.push(ZngurAttribute::CppRef(meta_list));
                     None
                 }
                 x => Some(x),
             };
             meta.map(|meta| Attribute { pound_token, style, bracket_token, meta })
-        })).filter_map(|a| a.transpose()).collect::<Result<_>>()?;
-        Ok((ret, passing_style, should_bind, needs_layout))
+        }).collect::<Vec<_>>();
+        Ok((attrs, zng_attrs))
     }
 
     fn parse_struct(&mut self, zng_writer: &mut ZngWriter, item: ItemStruct) -> Result<Option<ItemStruct>> {
@@ -891,7 +939,8 @@ impl ParseState {
             modpath.push(ty.to_token_stream().to_string());
             zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
             zng_writer.indent_level += 1;
-            let (attrs, passing_style, _, needs_layout) = self.parse_meta_attributes(zng_writer, attrs)?;
+            let (attrs, zng_attrs) = self.map_zngur_meta_attributes(attrs)?;
+            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
             if needs_layout && !has_generic_types {
                 zng_writer.layout(ty.to_token_stream().to_string());
             }
@@ -1326,7 +1375,8 @@ fn write_struct(ident: &Ident, has_generic_types: bool, attrs: Vec<Attribute>, m
     zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
     zng_writer.indent_level += 1;
 
-    let (attrs, passing_style, should_bind, needs_layout) = state.parse_meta_attributes(zng_writer, attrs)?;
+    let (attrs, zng_attrs) = state.map_zngur_meta_attributes(attrs)?;
+    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
     if needs_layout && !has_generic_types {
         zng_writer.layout(ident.to_string());
     }
