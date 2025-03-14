@@ -3,6 +3,7 @@
 
 mod parser;
 mod instantiate;
+mod cppwriter;
 
 use std::{
     borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::{Path, PathBuf}
@@ -13,7 +14,8 @@ use syn::{parse_quote, Expr, ExprLit, ExprTuple, Ident, Item, ItemMod, Lit};
 use zngur_generator::{ParsedZngFile, ZngurGenerator};
 use quote::{quote, ToTokens};
 
-pub use parser::{Parser, CppWriter, ParseMode};
+pub use parser::{Parser, ParseMode};
+pub use cppwriter::CppWriter;
 
 #[derive(Debug)]
 pub struct Error(pub Span, pub Cow<'static, str>);
