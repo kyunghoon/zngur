@@ -605,28 +605,6 @@ impl ParseState {
                     item_enum.attrs.push(parse_quote! { #[repr(u32)] });
                     zng_writer.wl(format!("enum {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
                 } else {
-                    fn write_enum(item_enum: &ItemEnum, enum_modpath: Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
-                        zng_writer.wl(format!("type {} {{", item_enum.ident).into());
-                        zng_writer.indent_level += 1;
-                        let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
-                        zng_writer.layout(if is_std {
-                            format!(":: {}", enum_modpath.join(" :: "))
-                        } else {
-                            format!("{}", enum_modpath.join(" :: "))
-                        });
-                        for variant in item_enum.variants.iter() {
-                            zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
-                        }
-                        if let Some(imp) = enum_impl {
-                            let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
-                            for item in imp.items {
-                                state.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
-                            }
-                        }
-                        zng_writer.indent_level -= 1;
-                        zng_writer.wl("}".into());
-                        Ok(())
-                    }
                     write_enum(&item_enum, enum_modpath, enum_impl, self, zng_writer)?;
                 }
             } else {
@@ -653,28 +631,7 @@ impl ParseState {
                 }
 
                 for (item, enum_impl, modpath, args) in instantiated_items {
-                    let mp: Punctuated::<_, Token![::]> = modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
-                    zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
-                        let a = map_type_paths(a.clone(), &mut |p| {
-                            if p.leading_colon.is_some() { p } else {
-                                parse_quote!(crate::#mp::#p)
-                            }
-                        }, None);
-                        a.to_token_stream().to_string()
-                    }).collect::<Vec<_>>().join(", ")).into());
-                    zng_writer.indent_level += 1;
-                    zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
-                    for variant in item.variants.iter() {
-                        zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
-                    }
-                    if let Some(imp) = enum_impl {
-                        let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
-                        for impl_item in imp.items {
-                            self.parse_impl_item(zng_writer, Some(&imp.self_ty), impl_item, trait_, false, None)?;
-                        }
-                    }
-                    zng_writer.indent_level -= 1;
-                    zng_writer.wl("}".into());
+                    write_enum_2(&item, &*args, &modpath, enum_impl, self, zng_writer)?;
                 }
             }
         }
@@ -1433,4 +1390,53 @@ impl Parser {
     pub fn needed_layouts(&self) -> Vec<(Type, usize, usize)> {
         self.zng_writer.needed_layouts()
     }
+}
+
+fn write_enum_2(item: &ItemEnum, args: &Vec<Type>, enum_modpath: &Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
+    let mp: Punctuated::<_, Token![::]> = enum_modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
+    zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
+        let a = map_type_paths(a.clone(), &mut |p| {
+            if p.leading_colon.is_some() { p } else {
+                parse_quote!(crate::#mp::#p)
+            }
+        }, None);
+        a.to_token_stream().to_string()
+    }).collect::<Vec<_>>().join(", ")).into());
+    zng_writer.indent_level += 1;
+    zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+    for variant in item.variants.iter() {
+        zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
+    }
+    if let Some(imp) = enum_impl {
+        let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
+        for impl_item in imp.items {
+            state.parse_impl_item(zng_writer, Some(&imp.self_ty), impl_item, trait_, false, None)?;
+        }
+    }
+    zng_writer.indent_level -= 1;
+    zng_writer.wl("}".into());
+    Ok(())
+}
+
+fn write_enum(item_enum: &ItemEnum, enum_modpath: Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
+    zng_writer.wl(format!("type {} {{", item_enum.ident).into());
+    zng_writer.indent_level += 1;
+    let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
+    zng_writer.layout(if is_std {
+        format!(":: {}", enum_modpath.join(" :: "))
+    } else {
+        format!("{}", enum_modpath.join(" :: "))
+    });
+    for variant in item_enum.variants.iter() {
+        zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
+    }
+    if let Some(imp) = enum_impl {
+        let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
+        for item in imp.items {
+            state.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
+        }
+    }
+    zng_writer.indent_level -= 1;
+    zng_writer.wl("}".into());
+    Ok(())
 }
