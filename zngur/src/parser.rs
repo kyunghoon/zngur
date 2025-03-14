@@ -859,7 +859,7 @@ impl ParseState {
 
         Ok((passing_style, should_bind, needs_layout))
     }
-    fn map_zngur_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<ZngurAttribute>)> {
+    fn parse_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<ZngurAttribute>)> {
         let mut zng_attrs = vec![];
         let attrs = attrs.into_iter().filter_map(|attr| {
             let Attribute { pound_token, style, bracket_token, meta } = attr;
@@ -939,7 +939,7 @@ impl ParseState {
             modpath.push(ty.to_token_stream().to_string());
             zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
             zng_writer.indent_level += 1;
-            let (attrs, zng_attrs) = self.map_zngur_meta_attributes(attrs)?;
+            let (attrs, zng_attrs) = self.parse_meta_attributes(attrs)?;
             let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
             if needs_layout && !has_generic_types {
                 zng_writer.layout(ty.to_token_stream().to_string());
@@ -956,7 +956,9 @@ impl ParseState {
         } else {
             modpath.push(ident.to_token_stream().to_string());
 
-            let (attrs,  id, passing_style) = write_struct(&ident, has_generic_types, attrs, &modpath, self, zng_writer)?;
+            let (attrs, zng_attrs) = self.parse_meta_attributes(attrs)?;
+
+            let (id, passing_style) = write_struct(&ident, has_generic_types, zng_attrs, &modpath, self, zng_writer)?;
             bind_id = id;
 
             (attrs, ident, passing_style, false)
@@ -1370,12 +1372,11 @@ fn write_enum(item: &ItemEnum, args: Option<&Vec<Type>>, enum_modpath: &Vec<Stri
     Ok(())
 }
 
-fn write_struct(ident: &Ident, has_generic_types: bool, attrs: Vec<Attribute>, modpath: &Vec<String>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<(Vec<Attribute>, Option<Ident>, Option<CppPassingStyle>)> {
+fn write_struct(ident: &Ident, has_generic_types: bool, zng_attrs: Vec<ZngurAttribute>, modpath: &Vec<String>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<(Option<Ident>, Option<CppPassingStyle>)> {
     let mut bind_id = None;
     zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
     zng_writer.indent_level += 1;
 
-    let (attrs, zng_attrs) = state.map_zngur_meta_attributes(attrs)?;
     let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
     if needs_layout && !has_generic_types {
         zng_writer.layout(ident.to_string());
@@ -1489,5 +1490,5 @@ fn write_struct(ident: &Ident, has_generic_types: bool, attrs: Vec<Attribute>, m
     }
     zng_writer.indent_level -= 1;
     zng_writer.wl("}".into());
-    Ok((attrs, bind_id, passing_style))
+    Ok((bind_id, passing_style))
 }
