@@ -5,7 +5,7 @@ mod parser;
 mod instantiate;
 
 use std::{
-    borrow::Cow, collections::{BTreeMap, HashMap}, fs::File, io::Write, path::{Path, PathBuf}
+    borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::{Path, PathBuf}
 };
 
 use proc_macro2::{Span, TokenStream};

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::{BTreeMap, HashMap}};
+use std::{borrow::Cow, collections::BTreeMap};
 use zngur::{ParseMode, Parser};
 use proc_macro2::Span;
 use proc_macro::TokenStream;

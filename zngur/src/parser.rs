@@ -2,7 +2,7 @@ use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, H
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, PatType, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItem, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParamBound, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParamBound, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
 use crate::instantiate::Instantiate;
 use super::{Result, Error};
 
@@ -668,7 +668,7 @@ impl Parser {
                     if let Some(imp) = enum_impl {
                         let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                         for item in imp.items {
-                            self.parse_impl_item(Some(&item_enum.ident), item, trait_, false, None)?;
+                            self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
                         }
                     }
                     self.zng_writer.indent_level -= 1;
@@ -714,9 +714,8 @@ impl Parser {
                     }
                     if let Some(imp) = enum_impl {
                         let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
-                        for item in imp.items {
-                            let enum_ident = item_enum.ident.clone();
-                            self.parse_impl_item(Some(&enum_ident), item, trait_, false, None)?;
+                        for impl_item in imp.items {
+                            self.parse_impl_item(Some(&imp.self_ty), impl_item, trait_, false, None)?;
                         }
                     }
                     self.zng_writer.indent_level -= 1;
@@ -806,6 +805,7 @@ impl Parser {
         } else { (items, None) };
         let span = self_ty.span();
         let mut self_ident = None;
+        let mut has_self_ty = false;
         let syn::Type::Path(mut type_path) = *self_ty else { return Err(Error::new(span, "invalid type".into())); };
         type_path.path.segments = type_path.path.segments.into_iter().map(|seg| {
             let PathSegment { ident, arguments } = seg;
@@ -813,6 +813,7 @@ impl Parser {
                 PathArguments::None => {
                     self.zng_writer.w(format!("{}", ident).into());
                     self_ident = Some(ident.clone());
+                    has_self_ty = true;
                     Ok((ident, PathArguments::None))
                 },
                 PathArguments::AngleBracketed(args) if ident == META_TYPE_NAME && args.args.len() == 1 => {
@@ -823,6 +824,7 @@ impl Parser {
                 PathArguments::AngleBracketed(args) => {
                     self.zng_writer.w(format!("{}<{}>", ident, args.args.to_token_stream()).into());
                     self_ident = Some(ident.clone());
+                    has_self_ty = true;
                     Ok((ident, PathArguments::AngleBracketed(args)))
                 }
                 x => Err(Error::new(x.span(), "invalid argument".into()))
@@ -833,13 +835,13 @@ impl Parser {
 
         self.zng_writer.wl(" {".into());
         self.zng_writer.indent_level += 1;
+        let self_ty = Box::new(syn::Type::Path(type_path));
         let items: Vec<ImplItem> = items.into_iter()
             .filter_map(|item| {
-                self.parse_impl_item(self_ident.as_ref(), item, corrected_trait_.as_ref(), is_extern_cpp, Some(&lts)).transpose()
+                self.parse_impl_item(has_self_ty.then_some(&*self_ty), item, corrected_trait_.as_ref(), is_extern_cpp, Some(&lts)).transpose()
             }).collect::<Result<_>>()?;
         self.zng_writer.indent_level -= 1;
         self.zng_writer.wl("}".into());
-        let self_ty = Box::new(syn::Type::Path(type_path));
         if trait_.is_some() && is_extern_cpp {
             Ok(None)
         } else {
@@ -984,7 +986,7 @@ impl Parser {
             if let Some(imp) = self.impls.remove(&modpath) {
                 let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                 for item in imp.items {
-                    self.parse_impl_item(Some(&ident), item, trait_, false, None)?;
+                    self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
                 }
             }
             self.zng_writer.indent_level -= 1;
@@ -1101,7 +1103,7 @@ impl Parser {
                 }
 
                 for item in imp.items {
-                    self.parse_impl_item(Some(&ident), item, trait_, false, None)?;
+                    self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
                 }
             }
             self.zng_writer.indent_level -= 1;
@@ -1262,7 +1264,14 @@ impl Parser {
             ty => ty
         })
     }
-    fn parse_impl_item(&mut self, self_ident: Option<&Ident>, item: ImplItem, trait_: Option<&Path>, is_extern_cpp: bool, lts: Option<&HashSet<&Ident>>) -> Result<Option<ImplItem>> {
+    fn parse_impl_item(&mut self, self_ty: Option<&Type>, item: ImplItem, trait_: Option<&Path>, is_extern_cpp: bool, lts: Option<&HashSet<&Ident>>) -> Result<Option<ImplItem>> {
+        let self_ident = self_ty.and_then(|ty| match ty {
+            Type::Path(type_path) if type_path.path.segments.len() == 1 => {
+                type_path.path.segments.first().map(|s| &s.ident)
+            },
+            _ => None,
+        });
+
         match item {
             ImplItem::Const(impl_item_const) => {
                 self.zng_writer.wl("// (CONST)".into());
@@ -1346,9 +1355,9 @@ impl Parser {
                         let should_bind = self_ident.map(|id| self.structs_that_bind.contains_key(id)).unwrap_or_default();
                         if should_bind {
                             let token_stream = remove_semicolon(token_stream)?;
-                            let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!("D") } };
+                            let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
                             impl_fn.attrs.push(parse_quote! { #[export] });
-                            self.parse_impl_item(self_ident, ImplItem::Fn(impl_fn), trait_, is_extern_cpp, lts)
+                            self.parse_impl_item(self_ty, ImplItem::Fn(impl_fn), trait_, is_extern_cpp, lts)
                         } else {
                             Ok(Some(ImplItem::Verbatim(token_stream)))
                         }
@@ -1358,7 +1367,7 @@ impl Parser {
                         let ImplItemFn { attrs, vis, defaultness, mut sig, block } = parse_quote! { #token_stream { unimplemented!() } };
                         let modpath = self.modpath();
                         if let Some((lines, w)) = cpp_lines.zip(self.cpp_writer.as_mut()) {
-                            w.add_lines(modpath, self_ident, trait_, &sig, &lines);
+                            w.add_lines(modpath, self_ty, trait_, &sig, &lines);
                         }
                         if is_extern_cpp {
                             sig = self.parse_sig(self_ident, sig, lts)?;
@@ -1407,7 +1416,7 @@ impl Parser {
 
 pub struct CppWriter {
     lines: Vec<String>,
-    dupcheck: HashSet<(Option<Ident>, Ident)>,
+    dupcheck: HashSet<(Option<Type>, Ident)>,
     prelude_types: Rc<BTreeMap<Ident, Vec<Ident>>>,
 }
 impl CppWriter {
@@ -1416,23 +1425,24 @@ impl CppWriter {
         dupcheck: Default::default(),
         prelude_types: Rc::new(Default::default()),
     } }
-    fn add_line(&mut self, modpath: Vec<String>, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature, line: impl ToString) {
-        let key = (self_ident.cloned(), sig.ident.clone());
+    #[allow(dead_code)]
+    fn add_line(&mut self, modpath: Vec<String>, self_ty: Option<&Type>, trait_: Option<&Path>, sig: &Signature, line: impl ToString) {
+        let key = (self_ty.cloned(), sig.ident.clone());
         if self.dupcheck.contains(&key) { return };
         self.dupcheck.insert(key);
 
-        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
+        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ty, trait_, sig);
         self.lines.push(format!("{}", cpp_sig));
 
         self.lines.push(line.to_string());
         self.lines.push("}".to_string());
     }
-    pub fn add_lines(&mut self, modpath: Vec<String>, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature, lines: &[impl ToString]) {
-        let key = (self_ident.cloned(), sig.ident.clone());
+    pub fn add_lines(&mut self, modpath: Vec<String>, self_ty: Option<&Type>, trait_: Option<&Path>, sig: &Signature, lines: &[impl ToString]) {
+        let key = (self_ty.cloned(), sig.ident.clone());
         if self.dupcheck.contains(&key) { return };
         self.dupcheck.insert(key);
 
-        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ident, trait_, sig);
+        let cpp_sig = self.cpp_sig(&modpath.join("::"), self_ty, trait_, sig);
         self.lines.push(format!("{}", cpp_sig));
 
         self.lines.append(&mut lines.into_iter().map(|c| c.to_string()).collect());
@@ -1469,8 +1479,8 @@ impl CppWriter {
         ].into_iter().map(|s| s.to_string()).collect());
         lines.join("\n")
     }
-    fn cpp_sig(&self, modpath: &String, self_ident: Option<&Ident>, trait_: Option<&Path>, sig: &Signature) -> String {
-        struct Cpp<'a> { prelude_types: &'a BTreeMap<Ident, Vec<Ident>>, modpath: &'a String, self_ident: Option<&'a Ident> }
+    fn cpp_sig(&self, modpath: &String, self_ty: Option<&Type>, trait_: Option<&Path>, sig: &Signature) -> String {
+        struct Cpp<'a> { prelude_types: &'a BTreeMap<Ident, Vec<Ident>>, modpath: &'a String, self_ty: Option<&'a Type> }
         impl<'a> Cpp<'a> {
             fn ident(&self, i: &Ident) -> String {
                 match i {
@@ -1494,14 +1504,14 @@ impl CppWriter {
                 let args = match &s.arguments {
                     PathArguments::None => "".to_string(),
                     PathArguments::AngleBracketed(a) =>
-                        a.args.iter().map(|a| match a {
-                            GenericArgument::Lifetime(lifetime) => "TYARGS[1]".to_string(),
-                            GenericArgument::Type(ty) => format!("{}", self.ty(ty)),
-                            GenericArgument::Const(expr) => "TYARGS[3]".to_string(),
-                            GenericArgument::AssocType(assoc_type) => "TYARGS[4]".to_string(),
-                            GenericArgument::AssocConst(assoc_const) => "TYARGS[5]".to_string(),
-                            GenericArgument::Constraint(constraint) => "TYARGS[6]".to_string(),
-                            _ => "TYARGS[??]".to_string(),
+                        a.args.iter().filter_map(|a| match a {
+                            GenericArgument::Lifetime(_lifetime) => None,
+                            GenericArgument::Type(ty) => Some(format!("{}", self.ty(ty))),
+                            GenericArgument::Const(_expr) => Some("TYARGS[3]".to_string()),
+                            GenericArgument::AssocType(_assoc_type) => Some("TYARGS[4]".to_string()),
+                            GenericArgument::AssocConst(_assoc_const) => Some("TYARGS[5]".to_string()),
+                            GenericArgument::Constraint(_constraint) => Some("TYARGS[6]".to_string()),
+                            _ => Some("TYARGS[??]".to_string()),
                         }).collect::<Vec<_>>().join(", "),
                     PathArguments::Parenthesized(a) => {
                         let mut tys = a.inputs.iter().map(|i| self.ty(i)).collect::<Vec<_>>();
@@ -1550,7 +1560,7 @@ impl CppWriter {
                     Type::Macro(t) => format!("TY6[{}]", t.to_token_stream()),
                     Type::Never(t) => format!("TY7[{}]", t.to_token_stream()),
                     Type::Paren(t) => format!("TY8[{}]", t.to_token_stream()),
-                    Type::Path(t) if t.path.is_ident("Self") && self.self_ident.is_some() => self.ident(self.self_ident.unwrap()),
+                    Type::Path(t) if t.path.is_ident("Self") && self.self_ty.is_some() => self.ty(self.self_ty.unwrap()),
                     Type::Path(t) => self.path(&t.path),
                     Type::Ptr(t) => format!("TY10[{}]", t.to_token_stream()),
                     Type::Reference(t) => format!("{}<{}>", if t.mutability.is_some() { "RefMut" } else { "Ref" }, self.ty(&*t.elem)),
@@ -1558,9 +1568,9 @@ impl CppWriter {
                     Type::TraitObject(t) => {
                         let bounds = t.bounds.iter().map(|b| match b {
                             TypeParamBound::Trait(trait_bound) => self.path(&trait_bound.path),
-                            TypeParamBound::Lifetime(l) => "BOUND2".to_string(),
-                            TypeParamBound::PreciseCapture(pc) => "BOUND3".to_string(),
-                            TypeParamBound::Verbatim(ts) => "BOUND4".to_string(),
+                            TypeParamBound::Lifetime(_l) => "BOUND2".to_string(),
+                            TypeParamBound::PreciseCapture(_pc) => "BOUND3".to_string(),
+                            TypeParamBound::Verbatim(_ts) => "BOUND4".to_string(),
                             _ => "BOUND[??]".to_string(),
                         }).collect::<Vec<_>>().join(" + ");
                         format!("Dyn<{}>", bounds)
@@ -1572,7 +1582,7 @@ impl CppWriter {
             }
         }
 
-        let cpp = Cpp { prelude_types: &self.prelude_types, modpath, self_ident };
+        let cpp = Cpp { prelude_types: &self.prelude_types, modpath, self_ty };
 
         let output = match &sig.output {
             ReturnType::Default => "void".to_string(),
@@ -1582,7 +1592,7 @@ impl CppWriter {
         let inputs = sig.inputs.iter().map(|i| {
             match i {
                 FnArg::Receiver(r) => {
-                    let ty = cpp.ty(&*r.ty);
+                    let ty = cpp.ty(&r.ty);
                     format!("{} {}", ty, r.self_token.to_token_stream())
                 }
                 FnArg::Typed(pat_type) => {
@@ -1597,19 +1607,17 @@ impl CppWriter {
             _ => Cow::Owned(sig.ident.to_string()),
         };
 
-        if let Some(ident) = self_ident {
+        if let Some(ty) = self_ty {
+            let ty = cpp.ty(ty);
             let tr = trait_.map(|p| Cow::Owned(cpp.path(p))).unwrap_or(Cow::Borrowed("Inherent"));
-            if modpath.is_empty() {
-                format!("{} Impl<{}, {}>::{}({}) {{", output, ident, tr, sig_ident, inputs)
-            } else {
-                format!("{} Impl<{}::{}, {}>::{}({}) {{", output, modpath, ident, tr, sig_ident, inputs)
-            }
+            format!("{} Impl<{}, {}>::{}({}) {{", output, ty, tr, sig_ident, inputs)
         } else {
             format!("{} exported_functions::{}({}) {{", output, sig_ident, inputs)
         }
     }
 }
 
+#[allow(dead_code)]
 mod cpp {
     use crate::{Result, Error};
     use proc_macro2::{Delimiter, TokenStream, TokenTree};
