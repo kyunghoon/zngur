@@ -238,6 +238,47 @@ fn extract_transfer_type_from_attributes(attrs: Vec<Attribute>) -> Result<(Vec<A
     Ok((attrs, ty))
 }
 
+pub fn map_type_paths(ty: Type, path_fn: &mut impl FnMut(Path) -> Path, lts: Option<&HashSet<&Ident>>) -> Type {
+    match ty {
+        Type::Array(TypeArray { bracket_token, elem, semi_token, len }) => 
+            Type::Array(TypeArray { bracket_token, elem: Box::new(map_type_paths(*elem, path_fn, lts)), semi_token, len }),
+        Type::BareFn(TypeBareFn { lifetimes, unsafety, abi, fn_token, paren_token, inputs, variadic, output }) =>
+            Type::BareFn(TypeBareFn { lifetimes, unsafety, abi, fn_token, paren_token,
+                inputs: inputs.into_iter().map(|mut i| { i.ty = map_type_paths(i.ty, path_fn, lts); i }).collect(),
+                variadic, 
+                output: match output {
+                    ReturnType::Type(rarrow, ty) => ReturnType::Type(rarrow, Box::new(map_type_paths(*ty, path_fn, lts))),
+                    x => x
+            }
+        }),
+        Type::Group(TypeGroup { group_token, elem }) => 
+            Type::Group(TypeGroup { group_token, elem: Box::new(map_type_paths(*elem, path_fn, lts)) }),
+        Type::Paren(TypeParen { paren_token, elem }) =>
+            Type::Paren(TypeParen { paren_token, elem: Box::new(map_type_paths(*elem, path_fn, lts)) }),
+        Type::Path(TypePath { qself, path }) =>
+            Type::Path(TypePath { qself, path: path_fn(path) }),
+        Type::Ptr(TypePtr { star_token, const_token, mutability, elem }) =>
+            Type::Ptr(TypePtr { star_token, const_token, mutability, elem: Box::new(map_type_paths(*elem, path_fn, lts)) }),
+        Type::Reference(TypeReference { and_token, lifetime, mutability, elem }) =>
+            Type::Reference(TypeReference {
+                and_token,
+                lifetime: match (lts, lifetime) {
+                    (_, Some(lt)) if lt.ident == "static" =>  Some(lt),
+                    (Some(list), Some(lt)) => 
+                        if list.contains(&lt.ident) { Some(lt) } else { None },
+                    _ => None,
+                },
+                mutability,
+                elem: Box::new(map_type_paths(*elem, path_fn, lts))
+            }),
+        Type::Slice(TypeSlice { bracket_token, elem }) =>
+            Type::Slice(TypeSlice { bracket_token, elem: Box::new(map_type_paths(*elem, path_fn, lts)) }),
+        Type::Tuple(TypeTuple { paren_token, elems }) =>
+            Type::Tuple(TypeTuple { paren_token, elems: elems.into_iter().map(|e| map_type_paths(e, path_fn, lts)).collect() }),
+        x => x
+    }
+}
+
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct Specialization {
     path: Vec<Ident>,
@@ -270,7 +311,7 @@ pub enum ParseMode {
     Generate,
 }
 
-pub struct Parser {
+struct ParseState {
     n: usize,
     modstack: RefCell<Vec<(
         String,
@@ -281,84 +322,12 @@ pub struct Parser {
     structs_that_bind: HashMap<Ident, Path>,
     prelude_types: Rc<BTreeMap<Ident, Vec<Ident>>>,
     cpp_writer: Option<CppWriter>,
-    zng_writer: ZngWriter,
     specializations: HashMap<Ident, HashSet<Specialization>>,
     has_generated: bool,
     mode: ParseMode,
     bind_traits: Vec<ItemTrait>,
 }
-impl Parser {
-    pub fn new(additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>) -> Self {
-        Self::with_details(false, additional_includes, prelude_types, false, ParseMode::Generate)
-    }
-    pub fn with_details(has_generated: bool, additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>, skip_artifacts: bool, mode: ParseMode) -> Self {
-        let mut ret = Self {
-            has_generated,
-            n: 0,
-            modstack: RefCell::new(vec![]),
-            impls: Default::default(),
-            structs_that_bind: Default::default(),
-            prelude_types: Rc::new(prelude_types),
-            cpp_writer: None,
-            zng_writer: ZngWriter::new(skip_artifacts),
-            specializations: Default::default(),
-            mode,
-            bind_traits: vec![],
-        };
-        if !additional_includes.is_empty() {
-            ret.zng_writer.wl("#cpp_additional_includes \"".into());
-            for include in additional_includes {
-                ret.zng_writer.wl(include.replace("\\", "\\\\").replace("\"", "\\\"").into());
-            }
-            ret.zng_writer.wl("\"".into());
-        }
-        ret
-    }
-    pub fn set_cpp_writer(&mut self, mut writer: CppWriter) {
-        writer.prelude_types =self.prelude_types.clone();
-        self.cpp_writer = Some(writer);
-    }
-    pub fn take_cpp_writer(&mut self) -> Option<CppWriter> { self.cpp_writer.take() }
-    pub fn map_type_paths(ty: Type, path_fn: &mut impl FnMut(Path) -> Path, lts: Option<&HashSet<&Ident>>) -> Type {
-        match ty {
-            Type::Array(TypeArray { bracket_token, elem, semi_token, len }) => 
-                Type::Array(TypeArray { bracket_token, elem: Box::new(Self::map_type_paths(*elem, path_fn, lts)), semi_token, len }),
-            Type::BareFn(TypeBareFn { lifetimes, unsafety, abi, fn_token, paren_token, inputs, variadic, output }) =>
-                Type::BareFn(TypeBareFn { lifetimes, unsafety, abi, fn_token, paren_token,
-                    inputs: inputs.into_iter().map(|mut i| { i.ty = Self::map_type_paths(i.ty, path_fn, lts); i }).collect(),
-                    variadic, 
-                    output: match output {
-                        ReturnType::Type(rarrow, ty) => ReturnType::Type(rarrow, Box::new(Self::map_type_paths(*ty, path_fn, lts))),
-                        x => x
-                }
-            }),
-            Type::Group(TypeGroup { group_token, elem }) => 
-                Type::Group(TypeGroup { group_token, elem: Box::new(Self::map_type_paths(*elem, path_fn, lts)) }),
-            Type::Paren(TypeParen { paren_token, elem }) =>
-                Type::Paren(TypeParen { paren_token, elem: Box::new(Self::map_type_paths(*elem, path_fn, lts)) }),
-            Type::Path(TypePath { qself, path }) =>
-                Type::Path(TypePath { qself, path: path_fn(path) }),
-            Type::Ptr(TypePtr { star_token, const_token, mutability, elem }) =>
-                Type::Ptr(TypePtr { star_token, const_token, mutability, elem: Box::new(Self::map_type_paths(*elem, path_fn, lts)) }),
-            Type::Reference(TypeReference { and_token, lifetime, mutability, elem }) =>
-                Type::Reference(TypeReference {
-                    and_token,
-                    lifetime: match (lts, lifetime) {
-                        (_, Some(lt)) if lt.ident == "static" =>  Some(lt),
-                        (Some(list), Some(lt)) => 
-                            if list.contains(&lt.ident) { Some(lt) } else { None },
-                        _ => None,
-                    },
-                    mutability,
-                    elem: Box::new(Self::map_type_paths(*elem, path_fn, lts))
-                }),
-            Type::Slice(TypeSlice { bracket_token, elem }) =>
-                Type::Slice(TypeSlice { bracket_token, elem: Box::new(Self::map_type_paths(*elem, path_fn, lts)) }),
-            Type::Tuple(TypeTuple { paren_token, elems }) =>
-                Type::Tuple(TypeTuple { paren_token, elems: elems.into_iter().map(|e| Self::map_type_paths(e, path_fn, lts)).collect() }),
-            x => x
-        }
-    }
+impl ParseState {
     fn fully_qualify_path(&self, mut p: Path, lts: Option<&HashSet<&Ident>>) -> Path {
         let is_std = p.segments.first().map(|s| s.ident == "std").unwrap_or_default();
         if is_std {
@@ -379,7 +348,7 @@ impl Parser {
                                 match a {
                                     GenericArgument::Type(ty) =>
                                         Some(GenericArgument::Type(
-                                            Self::map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts)
+                                            map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts)
                                         )),
                                     GenericArgument::Lifetime(lt) => {
                                         match lts {
@@ -421,7 +390,7 @@ impl Parser {
                 if let Some(path) = self.prelude_types.get(&seg.ident) {
                     let args = args.args.iter().filter_map(|a| match a {
                         GenericArgument::Type(ty) => {
-                            Some(Self::map_type_paths(ty.clone(), &mut |p| self.fully_qualify_path(p, lts), lts))
+                            Some(map_type_paths(ty.clone(), &mut |p| self.fully_qualify_path(p, lts), lts))
                         },
                         _ => None,
                     }).collect::<Vec<_>>();
@@ -496,12 +465,6 @@ impl Parser {
             impls.insert(id.to_string());
         }
     }
-    pub fn needed_layouts(&self) -> Vec<(Type, usize, usize)> {
-        self.zng_writer.needed_layouts()
-    }
-    pub fn output(&mut self) -> Vec<String> {
-        self.zng_writer.output()
-    }
     fn collect_impls(&mut self, mut item_mod: ItemMod, on_should_bind: &mut impl FnMut(&Ident, &Path), on_impl: &mut impl FnMut(Vec<String>, ItemImpl)) -> Result<ItemMod> {
         self.push_mod(&item_mod.ident);
         item_mod.content = item_mod.content.map(|(b, items)| {
@@ -526,26 +489,7 @@ impl Parser {
         let _ = self.pop_mod();
         Ok(item_mod)
     }
-    pub fn parse(&mut self, item: ItemMod) -> Result<Vec<Item>> {
-        let mut structs_that_bind = HashMap::<Ident, Path>::new();
-        let mut impls = HashMap::<Vec<String>, ItemImpl>::new();
-        let item = self.collect_impls(item,
-            &mut|ident, path| {
-                structs_that_bind.insert(ident.clone(), path.clone());
-            },
-            &mut |modpath, item_impl| {
-                impls.insert(modpath, item_impl);
-            }
-        )?;
-        self.impls = impls;
-        self.structs_that_bind = structs_that_bind;
-
-        let items = self.parse_mod(item)?.and_then(|item|
-            item.content.map(|(_, items)| items)).unwrap_or_default();
-
-        Ok(items)
-    }
-    fn parse_mod(&mut self, item: ItemMod) -> Result<Option<ItemMod>> {
+    fn parse_mod(&mut self, zng_writer: &mut ZngWriter, item: ItemMod) -> Result<Option<ItemMod>> {
         self.push_mod(&item.ident);
 
         if let Some(mut writer) = self.cpp_writer.take() {
@@ -556,20 +500,20 @@ impl Parser {
 
         let (mod_ident, item, is_crate) = self.parse_mod_ident(item);
         if let Some(ident) = &mod_ident {
-            self.zng_writer.wl(format!("mod {} {{", ident).into());
-            self.zng_writer.indent_level += 1;
+            zng_writer.wl(format!("mod {} {{", ident).into());
+            zng_writer.indent_level += 1;
         }
         let ItemMod { attrs, vis, unsafety, mod_token, ident, content, semi } = item;
         let content = content.map(|(b, items)|
             items.into_iter().map(|i|
-                self.parse_item(i, is_crate))
+                self.parse_item(zng_writer, i, is_crate))
                     .filter_map(|v| v.transpose())
                     .collect::<Result<_>>()
                     .map(|v: Vec<Item>| (b, v))
         ).transpose()?;
         if mod_ident.is_some() {
-            self.zng_writer.indent_level -= 1;
-            self.zng_writer.wl("}".into());
+            zng_writer.indent_level -= 1;
+            zng_writer.wl("}".into());
         }
         let missing_structs = self.pop_mod();
         let content = content.and_then(|(b, mut items)| {
@@ -598,52 +542,52 @@ impl Parser {
             Ok(Some(ItemMod { attrs, vis, unsafety, mod_token, ident, content, semi }))
         }
     }
-    fn parse_item(&mut self, item: Item, is_crate: bool) -> Result<Option<Item>> {
+    fn parse_item(&mut self, zng_writer: &mut ZngWriter, item: Item, is_crate: bool) -> Result<Option<Item>> {
         Ok(match item {
-            Item::Const(item_const) => self.parse_const(item_const)?.map(Item::Const),
-            Item::Enum(item_enum) => self.parse_enum(item_enum, is_crate)?.map(Item::Enum),
-            Item::ExternCrate(item_extern_crate) => self.parse_extern_crate(item_extern_crate)?.map(Item::ExternCrate),
+            Item::Const(item_const) => self.parse_const(zng_writer, item_const)?.map(Item::Const),
+            Item::Enum(item_enum) => self.parse_enum(zng_writer, item_enum, is_crate)?.map(Item::Enum),
+            Item::ExternCrate(item_extern_crate) => self.parse_extern_crate(zng_writer, item_extern_crate)?.map(Item::ExternCrate),
             Item::Fn(item_fn) => self.parse_fn(item_fn)?.map(Item::Fn),
-            Item::ForeignMod(item_foreign_mod) => self.parse_foreign_mod(item_foreign_mod)?.map(Item::ForeignMod),
+            Item::ForeignMod(item_foreign_mod) => self.parse_foreign_mod(zng_writer, item_foreign_mod)?.map(Item::ForeignMod),
             Item::Impl(item_impl) => {
                 let has_imports = Self::has_imports(item_impl.items.iter())?;
 
-                let disabled = self.zng_writer.disabled;
-                self.zng_writer.disabled = true;
-                let ret = self.parse_impl(item_impl.clone(), has_imports)?
+                let disabled = zng_writer.disabled;
+                zng_writer.disabled = true;
+                let ret = self.parse_impl(zng_writer, item_impl.clone(), has_imports)?
                     .and_then(|imp| if imp.items.is_empty() { None } else { Some(Item::Impl(imp)) });
-                self.zng_writer.disabled = disabled;
+                zng_writer.disabled = disabled;
 
                 if has_imports {
-                    self.zng_writer.wl("extern \"C++\" {".into());
-                    self.zng_writer.indent_level += 1;
-                    let _ = self.parse_impl(item_impl, true)?;
-                    self.zng_writer.indent_level -= 1;
-                    self.zng_writer.wl("}".into());
+                    zng_writer.wl("extern \"C++\" {".into());
+                    zng_writer.indent_level += 1;
+                    let _ = self.parse_impl(zng_writer, item_impl, true)?;
+                    zng_writer.indent_level -= 1;
+                    zng_writer.wl("}".into());
                 }
                 ret
             },
-            Item::Macro(item_macro) =>self.parse_macro(item_macro)?.map(Item::Macro),
-            Item::Mod(item_mod) => self.parse_mod(item_mod)?.map(Item::Mod),
-            Item::Static(item_static) => self.parse_static(item_static)?.map(Item::Static),
-            Item::Struct(item_struct) => self.parse_struct(item_struct)?.map(Item::Struct),
-            Item::Trait(item_trait) => self.parse_trait(item_trait)?.map(Item::Trait),
-            Item::TraitAlias(item_trait_alias) => self.parse_trait_alias(item_trait_alias)?.map(Item::TraitAlias),
-            Item::Type(item_type) =>  self.parse_type(item_type)?.map(Item::Type),
-            Item::Union(item_union) => self.parse_union(item_union)?.map(Item::Union),
+            Item::Macro(item_macro) =>self.parse_macro(zng_writer, item_macro)?.map(Item::Macro),
+            Item::Mod(item_mod) => self.parse_mod(zng_writer, item_mod)?.map(Item::Mod),
+            Item::Static(item_static) => self.parse_static(zng_writer, item_static)?.map(Item::Static),
+            Item::Struct(item_struct) => self.parse_struct(zng_writer, item_struct)?.map(Item::Struct),
+            Item::Trait(item_trait) => self.parse_trait(zng_writer, item_trait)?.map(Item::Trait),
+            Item::TraitAlias(item_trait_alias) => self.parse_trait_alias(zng_writer, item_trait_alias)?.map(Item::TraitAlias),
+            Item::Type(item_type) =>  self.parse_type(zng_writer, item_type)?.map(Item::Type),
+            Item::Union(item_union) => self.parse_union(zng_writer, item_union)?.map(Item::Union),
             Item::Use(item_use) => self.parse_use(item_use)?.map(Item::Use),
-            Item::Verbatim(token_stream) => self.parse_verbatim(token_stream.clone())?.map(Item::Verbatim),
+            Item::Verbatim(token_stream) => self.parse_verbatim(zng_writer, token_stream.clone())?.map(Item::Verbatim),
             x => {
-                self.zng_writer.wl("// UNKNOWN".into());
+                zng_writer.wl("// UNKNOWN".into());
                 Some(x)
             },
         })
     }
-    fn parse_const(&mut self, item: ItemConst) -> Result<Option<ItemConst>> {
-        self.zng_writer.wl("CONST".into());
+    fn parse_const(&mut self, zng_writer: &mut ZngWriter, item: ItemConst) -> Result<Option<ItemConst>> {
+        zng_writer.wl("CONST".into());
         Ok(Some(item))
     }
-    fn parse_enum(&mut self, mut item_enum: ItemEnum, is_crate: bool) -> Result<Option<ItemEnum>> {
+    fn parse_enum(&mut self, zng_writer: &mut ZngWriter, mut item_enum: ItemEnum, is_crate: bool) -> Result<Option<ItemEnum>> {
         let (attrs, transfer_type) = extract_transfer_type_from_attributes(item_enum.attrs)?;
         item_enum.attrs = attrs;
 
@@ -659,27 +603,31 @@ impl Parser {
             if num_generics == 0 {
                 if is_crate {
                     item_enum.attrs.push(parse_quote! { #[repr(u32)] });
-                    self.zng_writer.wl(format!("enum {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
+                    zng_writer.wl(format!("enum {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
                 } else {
-                    self.zng_writer.wl(format!("type {} {{", item_enum.ident).into());
-                    self.zng_writer.indent_level += 1;
-                    let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
-                    self.zng_writer.layout(if is_std {
-                        format!(":: {}", enum_modpath.join(" :: "))
-                    } else {
-                        format!("{}", enum_modpath.join(" :: "))
-                    });
-                    for variant in item_enum.variants.iter() {
-                        self.zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
-                    }
-                    if let Some(imp) = enum_impl {
-                        let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
-                        for item in imp.items {
-                            self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
+                    fn write_enum(item_enum: &ItemEnum, enum_modpath: Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
+                        zng_writer.wl(format!("type {} {{", item_enum.ident).into());
+                        zng_writer.indent_level += 1;
+                        let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
+                        zng_writer.layout(if is_std {
+                            format!(":: {}", enum_modpath.join(" :: "))
+                        } else {
+                            format!("{}", enum_modpath.join(" :: "))
+                        });
+                        for variant in item_enum.variants.iter() {
+                            zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
                         }
+                        if let Some(imp) = enum_impl {
+                            let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
+                            for item in imp.items {
+                                state.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
+                            }
+                        }
+                        zng_writer.indent_level -= 1;
+                        zng_writer.wl("}".into());
+                        Ok(())
                     }
-                    self.zng_writer.indent_level -= 1;
-                    self.zng_writer.wl("}".into());
+                    write_enum(&item_enum, enum_modpath, enum_impl, self, zng_writer)?;
                 }
             } else {
                 let mut instantiated_items = vec![];
@@ -706,27 +654,27 @@ impl Parser {
 
                 for (item, enum_impl, modpath, args) in instantiated_items {
                     let mp: Punctuated::<_, Token![::]> = modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
-                    self.zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
-                        let a = Self::map_type_paths(a.clone(), &mut |p| {
+                    zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
+                        let a = map_type_paths(a.clone(), &mut |p| {
                             if p.leading_colon.is_some() { p } else {
                                 parse_quote!(crate::#mp::#p)
                             }
                         }, None);
                         a.to_token_stream().to_string()
                     }).collect::<Vec<_>>().join(", ")).into());
-                    self.zng_writer.indent_level += 1;
-                    self.zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+                    zng_writer.indent_level += 1;
+                    zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
                     for variant in item.variants.iter() {
-                        self.zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
+                        zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
                     }
                     if let Some(imp) = enum_impl {
                         let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                         for impl_item in imp.items {
-                            self.parse_impl_item(Some(&imp.self_ty), impl_item, trait_, false, None)?;
+                            self.parse_impl_item(zng_writer, Some(&imp.self_ty), impl_item, trait_, false, None)?;
                         }
                     }
-                    self.zng_writer.indent_level -= 1;
-                    self.zng_writer.wl("}".into());
+                    zng_writer.indent_level -= 1;
+                    zng_writer.wl("}".into());
                 }
             }
         }
@@ -739,15 +687,15 @@ impl Parser {
             Ok(Some(item_enum))
         }
     }
-    fn parse_extern_crate(&mut self, item: ItemExternCrate) -> Result<Option<ItemExternCrate>> {
-        self.zng_writer.wl("EXTERN_CRATE".into());
+    fn parse_extern_crate(&mut self, zng_writer: &mut ZngWriter, item: ItemExternCrate) -> Result<Option<ItemExternCrate>> {
+        zng_writer.wl("EXTERN_CRATE".into());
         Ok(Some(item))
     }
     fn parse_fn(&mut self, item: ItemFn) -> Result<Option<ItemFn>> {
         Ok(Some(item))
     }
-    fn parse_foreign_mod(&mut self, item: ItemForeignMod) -> Result<Option<ItemForeignMod>> {
-        self.zng_writer.wl("FOREIGN_MOD".into());
+    fn parse_foreign_mod(&mut self, zng_writer: &mut ZngWriter, item: ItemForeignMod) -> Result<Option<ItemForeignMod>> {
+        zng_writer.wl("FOREIGN_MOD".into());
         Ok(Some(item))
     }
     fn has_imports<'a>(items: impl Iterator<Item = &'a ImplItem>) -> Result<bool> {
@@ -772,28 +720,28 @@ impl Parser {
         }
         return Ok(false);
     }
-    fn parse_impl(&mut self, item: ItemImpl, is_extern_cpp: bool) -> Result<Option<ItemImpl>> {
+    fn parse_impl(&mut self, zng_writer: &mut ZngWriter, item: ItemImpl, is_extern_cpp: bool) -> Result<Option<ItemImpl>> {
         let ItemImpl { attrs, defaultness, unsafety, impl_token, generics, trait_, self_ty, brace_token, items } = item;
         if let Some(attr) = attrs.first() {
             return Err(Error::new(attr.span(), "unexpected attribute".into()));
         }
-        self.zng_writer.w("impl".into());
+        zng_writer.w("impl".into());
         let lifetimes = generics.lifetimes().collect::<Punctuated<_, Token![,]>>();
         if !lifetimes.is_empty() {
-            self.zng_writer.w(format!("<{}>", lifetimes.to_token_stream()).into());
+            zng_writer.w(format!("<{}>", lifetimes.to_token_stream()).into());
         }
-        self.zng_writer.w(format!(" ").into());
+        zng_writer.w(format!(" ").into());
         let lts = generics.lifetimes().map(|l| &l.lifetime.ident).collect::<HashSet<_>>();
         let (items, corrected_trait_) = if let Some((_, path, ..)) = &trait_ {
             let mut path = self.fully_qualify_path(path.clone(), Some(&lts));
-            self.zng_writer.w(format!("{}", path.to_token_stream()).into());
+            zng_writer.w(format!("{}", path.to_token_stream()).into());
             // Special case: In zngur, the `Iterator` trait's `Item` type is not defined as an associated type.
             // To handle this, we remove any `ImplItem::Type` with the identifier `Item` and re-insert it 
             // as a generic parameter instead. This preserves compatibility.
             let items = if let Some(last) = path.segments.last_mut() {
                 let items = items.into_iter().map(|i| match i {
                     ImplItem::Type(i) if i.ident == "Item" => {
-                        self.zng_writer.w(format!("<Item = {}>", i.ty.to_token_stream()).into());
+                        zng_writer.w(format!("<Item = {}>", i.ty.to_token_stream()).into());
                         if matches!(last.arguments, PathArguments::None) {
                             let ty = &i.ty;
                             let args: AngleBracketedGenericArguments = parse_quote! { <#ty> };
@@ -807,7 +755,7 @@ impl Parser {
             } else {
                 items
             };
-            self.zng_writer.w(" for ".into());
+            zng_writer.w(" for ".into());
             (items, Some(path))
         } else { (items, None) };
         let span = self_ty.span();
@@ -818,18 +766,18 @@ impl Parser {
             let PathSegment { ident, arguments } = seg;
             let (ident, arguments) = match arguments {
                 PathArguments::None => {
-                    self.zng_writer.w(format!("{}", ident).into());
+                    zng_writer.w(format!("{}", ident).into());
                     self_ident = Some(ident.clone());
                     has_self_ty = true;
                     Ok((ident, PathArguments::None))
                 },
                 PathArguments::AngleBracketed(args) if ident == META_TYPE_NAME && args.args.len() == 1 => {
                     let arg = args.args.first().unwrap();
-                    self.zng_writer.w(format!("{}", arg.to_token_stream()).into());
+                    zng_writer.w(format!("{}", arg.to_token_stream()).into());
                     Ok((self.gensym(), PathArguments::None))
                 }
                 PathArguments::AngleBracketed(args) => {
-                    self.zng_writer.w(format!("{}<{}>", ident, args.args.to_token_stream()).into());
+                    zng_writer.w(format!("{}<{}>", ident, args.args.to_token_stream()).into());
                     self_ident = Some(ident.clone());
                     has_self_ty = true;
                     Ok((ident, PathArguments::AngleBracketed(args)))
@@ -840,15 +788,15 @@ impl Parser {
             Ok(PathSegment { ident, arguments })
         }).collect::<Result<_>>()?;
 
-        self.zng_writer.wl(" {".into());
-        self.zng_writer.indent_level += 1;
+        zng_writer.wl(" {".into());
+        zng_writer.indent_level += 1;
         let self_ty = Box::new(syn::Type::Path(type_path));
         let items: Vec<ImplItem> = items.into_iter()
             .filter_map(|item| {
-                self.parse_impl_item(has_self_ty.then_some(&*self_ty), item, corrected_trait_.as_ref(), is_extern_cpp, Some(&lts)).transpose()
+                self.parse_impl_item(zng_writer, has_self_ty.then_some(&*self_ty), item, corrected_trait_.as_ref(), is_extern_cpp, Some(&lts)).transpose()
             }).collect::<Result<_>>()?;
-        self.zng_writer.indent_level -= 1;
-        self.zng_writer.wl("}".into());
+        zng_writer.indent_level -= 1;
+        zng_writer.wl("}".into());
         if trait_.is_some() && is_extern_cpp {
             Ok(None)
         } else {
@@ -866,15 +814,15 @@ impl Parser {
             Ok(Some(ItemImpl { attrs, defaultness, unsafety, impl_token, generics, trait_, self_ty, brace_token, items }))
         }
     }
-    fn parse_macro(&mut self, item: ItemMacro) -> Result<Option<ItemMacro>> {
-        self.zng_writer.wl("MACRO".into());
+    fn parse_macro(&mut self, zng_writer: &mut ZngWriter, item: ItemMacro) -> Result<Option<ItemMacro>> {
+        zng_writer.wl("MACRO".into());
         Ok(Some(item))
     }
-    fn parse_static(&mut self, item: ItemStatic) -> Result<Option<ItemStatic>> {
-        self.zng_writer.wl("STATIC".into());
+    fn parse_static(&mut self, zng_writer: &mut ZngWriter, item: ItemStatic) -> Result<Option<ItemStatic>> {
+        zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<CppPassingStyle>, bool, bool)> {
+    fn parse_meta_attributes(&mut self, zng_writer: &mut ZngWriter, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<CppPassingStyle>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
         let mut should_bind = false;
@@ -893,7 +841,7 @@ impl Parser {
                         match (&toks[0], &toks[1]) {
                             (TokenTree::Punct(a), TokenTree::Ident(b)) if a.as_char() == '?' && b == "Sized" => {
                                 found_index = Some(n);
-                                self.zng_writer.wl(format!("wellknown_traits(?Sized);").into());
+                                zng_writer.wl(format!("wellknown_traits(?Sized);").into());
                                 needs_layout = false;
                             }
                             _ => ()
@@ -909,7 +857,7 @@ impl Parser {
                             match meta {
                                 Meta::Path(path) if path.is_ident("Copy") => {
                                     has_copy = true;
-                                    self.zng_writer.wl(format!("wellknown_traits(Copy);").into());
+                                    zng_writer.wl(format!("wellknown_traits(Copy);").into());
                                 }
                                 Meta::Path(path) if path.is_ident("Clone") => {
                                     has_clone = true;
@@ -925,7 +873,7 @@ impl Parser {
                     Some(Meta::List(meta_list))
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_value") => {
-                    self.zng_writer.wl("constructor(ZngurCppOpaqueOwnedObject);".into());
+                    zng_writer.wl("constructor(ZngurCppOpaqueOwnedObject);".into());
                     let span = meta_list.span();
                     let Ok(args) = meta_list.parse_args_with(
                         Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
@@ -935,7 +883,7 @@ impl Parser {
                     let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
                         return Err(Error::new(span, "invalid cpp_value token".into()))
                     }; 
-                    self.zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
                     passing_style = Some(CppPassingStyle::Value);
                     None
                 }
@@ -949,7 +897,7 @@ impl Parser {
                     let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
                         return Err(Error::new(span, "invalid rust_value token".into()))
                     }; 
-                    self.zng_writer.wl(format!("#rust_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                    zng_writer.wl(format!("#rust_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
                     None
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_ref") => {
@@ -962,7 +910,7 @@ impl Parser {
                     let (Some(Lit::Str(a)), None) = (ai.next(), ai.next()) else {
                         return Err(Error::new(span, format!("invalid cpp_ref token").into()));
                     };
-                    self.zng_writer.wl(format!("#cpp_ref \"{}\";", a.value()).into());
+                    zng_writer.wl(format!("#cpp_ref \"{}\";", a.value()).into());
                     needs_layout = false;
                     passing_style = Some(CppPassingStyle::Ref);
                     None
@@ -974,7 +922,7 @@ impl Parser {
         Ok((ret, passing_style, should_bind, needs_layout))
     }
 
-    fn parse_struct(&mut self, item: ItemStruct) -> Result<Option<ItemStruct>> {
+    fn parse_struct(&mut self, zng_writer: &mut ZngWriter, item: ItemStruct) -> Result<Option<ItemStruct>> {
         let ItemStruct { attrs, vis, struct_token, ident, generics, fields, semi_token } = item;
         let has_generic_types = generics.type_params().peekable().next().is_some();
         let mut bind_id = None;
@@ -982,30 +930,30 @@ impl Parser {
         let (attrs, ident, passing_style, is_meta_type) = if ident == META_TYPE_NAME {
             let span = fields.span();
             let (1, Some(syn::Field { ident: None, ty , .. })) = (fields.len(), fields.iter().next()) else { return Err(Error::new(span, "expects a single field".into())); };
-            let ty = Self::map_type_paths(ty.clone(), &mut |p| self.fully_qualify_path(p, None), None);
+            let ty = map_type_paths(ty.clone(), &mut |p| self.fully_qualify_path(p, None), None);
             modpath.push(ty.to_token_stream().to_string());
-            self.zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
-            self.zng_writer.indent_level += 1;
-            let (attrs, passing_style, _, needs_layout) = self.parse_meta_attributes(attrs)?;
+            zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
+            zng_writer.indent_level += 1;
+            let (attrs, passing_style, _, needs_layout) = self.parse_meta_attributes(zng_writer, attrs)?;
             if needs_layout && !has_generic_types {
-                self.zng_writer.layout(ty.to_token_stream().to_string());
+                zng_writer.layout(ty.to_token_stream().to_string());
             }
             if let Some(imp) = self.impls.remove(&modpath) {
                 let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
                 for item in imp.items {
-                    self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
+                    self.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
                 }
             }
-            self.zng_writer.indent_level -= 1;
-            self.zng_writer.wl("}".into());
+            zng_writer.indent_level -= 1;
+            zng_writer.wl("}".into());
             (attrs, self.gensym(), passing_style, self.mode != ParseMode::TypeCheck)
         } else {
             modpath.push(ident.to_token_stream().to_string());
-            self.zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
-            self.zng_writer.indent_level += 1;
-            let (attrs, passing_style, should_bind, needs_layout) = self.parse_meta_attributes(attrs)?;
+            zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
+            zng_writer.indent_level += 1;
+            let (attrs, passing_style, should_bind, needs_layout) = self.parse_meta_attributes(zng_writer, attrs)?;
             if needs_layout && !has_generic_types {
-                self.zng_writer.layout(ident.to_string());
+                zng_writer.layout(ident.to_string());
             }
             if let Some(imp) = self.impls.remove(&modpath) {
                 let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
@@ -1110,11 +1058,11 @@ impl Parser {
                 }
 
                 for item in imp.items {
-                    self.parse_impl_item(Some(&imp.self_ty), item, trait_, false, None)?;
+                    self.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
                 }
             }
-            self.zng_writer.indent_level -= 1;
-            self.zng_writer.wl("}".into());
+            zng_writer.indent_level -= 1;
+            zng_writer.wl("}".into());
             (attrs, ident, passing_style, false)
         };
         self.declare_type_identifier(&ident);
@@ -1138,40 +1086,40 @@ impl Parser {
             }
         }
     }
-    fn parse_trait(&mut self, item: ItemTrait) -> Result<Option<ItemTrait>> {
-        self.zng_writer.wl("TRAIT".into());
+    fn parse_trait(&mut self, zng_writer: &mut ZngWriter, item: ItemTrait) -> Result<Option<ItemTrait>> {
+        zng_writer.wl("TRAIT".into());
         Ok(Some(item))
     }
-    fn parse_trait_alias(&mut self, item: ItemTraitAlias) -> Result<Option<ItemTraitAlias>> {
-        self.zng_writer.wl("TRAIT_ALIAS".into());
+    fn parse_trait_alias(&mut self, zng_writer: &mut ZngWriter, item: ItemTraitAlias) -> Result<Option<ItemTraitAlias>> {
+        zng_writer.wl("TRAIT_ALIAS".into());
         Ok(Some(item))
     }
-    fn parse_type(&mut self, item: ItemType) -> Result<Option<ItemType>> {
-        self.zng_writer.wl("TYPE".into());
+    fn parse_type(&mut self, zng_writer: &mut ZngWriter, item: ItemType) -> Result<Option<ItemType>> {
+        zng_writer.wl("TYPE".into());
         Ok(Some(item))
     }
-    fn parse_union(&mut self, item: ItemUnion) -> Result<Option<ItemUnion>> {
-        self.zng_writer.wl("UNION".into());
+    fn parse_union(&mut self, zng_writer: &mut ZngWriter, item: ItemUnion) -> Result<Option<ItemUnion>> {
+        zng_writer.wl("UNION".into());
         Ok(Some(item))
     }
     fn parse_use(&mut self, item: ItemUse) -> Result<Option<ItemUse>> {
         Ok(Some(item))
     }
-    fn parse_verbatim(&mut self, token_stream: proc_macro2::TokenStream) -> Result<Option<proc_macro2::TokenStream>> {
+    fn parse_verbatim(&mut self, zng_writer: &mut ZngWriter, token_stream: proc_macro2::TokenStream) -> Result<Option<proc_macro2::TokenStream>> {
         let (token_stream, transfer_type) = extract_transfer_type_from_token_stream(token_stream.clone())?;
         match transfer_type {
             Some(TransferType::Expose) => {
                 let token_stream = remove_semicolon(token_stream)?;
                 let item_fn: ItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                self.parse_sig(None, item_fn.sig, None)?;
+                self.parse_sig(zng_writer, None, item_fn.sig, None)?;
                 Ok(None)
             }
             Some(TransferType::Export) => {
                 Ok(Some(token_stream))
             }
             Some(TransferType::Import(cpp_lines)) => {
-                self.zng_writer.wl("extern \"C++\" {".into());
-                self.zng_writer.indent_level += 1;
+                zng_writer.wl("extern \"C++\" {".into());
+                zng_writer.indent_level += 1;
                 let token_stream = remove_semicolon(token_stream)?;
                 let item_fn: ItemFn = parse_quote! { #token_stream { unimplemented!() } };
                 let modpath = self.modpath();
@@ -1191,9 +1139,9 @@ impl Parser {
                 } else {
                     item_fn
                 };
-                item_fn.sig = self.parse_sig(None, item_fn.sig, None)?;
-                self.zng_writer.indent_level -= 1;
-                self.zng_writer.wl("}".into());
+                item_fn.sig = self.parse_sig(zng_writer, None, item_fn.sig, None)?;
+                zng_writer.indent_level -= 1;
+                zng_writer.wl("}".into());
                 if self.mode == ParseMode::Generate {
                     let fn_ident = &item_fn.sig.ident;
                     Ok(Some(parse_quote! { pub(crate) use super::generated::#fn_ident; }))
@@ -1206,38 +1154,38 @@ impl Parser {
             }
         }
     }
-    fn parse_ty(&mut self, ty: syn::Type, lts: Option<&HashSet<&Ident>>) -> Result<syn::Type> {
+    fn parse_ty(&mut self, zng_writer: &mut ZngWriter, ty: syn::Type, lts: Option<&HashSet<&Ident>>) -> Result<syn::Type> {
         Ok(match ty {
             syn::Type::Array(type_array) => {
-                self.zng_writer.wl("[ARRAY]".into());
+                zng_writer.wl("[ARRAY]".into());
                 syn::Type::Array(type_array)
             }
             syn::Type::BareFn(type_bare_fn) => {
-                self.zng_writer.wl("[BARE_FN]".into());
+                zng_writer.wl("[BARE_FN]".into());
                 syn::Type::BareFn(type_bare_fn)
             }
             syn::Type::Group(type_group) => {
-                self.zng_writer.wl("//[GROUP]".into());
+                zng_writer.wl("//[GROUP]".into());
                 syn::Type::Group(type_group)
             }
             syn::Type::ImplTrait(type_impl_trait) => {
-                self.zng_writer.wl("//[IMPL_TRAIT]".into());
+                zng_writer.wl("//[IMPL_TRAIT]".into());
                 syn::Type::ImplTrait(type_impl_trait)
             }
             syn::Type::Infer(type_infer) => {
-                self.zng_writer.wl("//[INFER]".into());
+                zng_writer.wl("//[INFER]".into());
                 syn::Type::Infer(type_infer)
             }
             syn::Type::Macro(type_macro) => {
-                self.zng_writer.wl("//[MACRO]".into());
+                zng_writer.wl("//[MACRO]".into());
                 syn::Type::Macro(type_macro)
             }
             syn::Type::Never(type_never) => {
-                self.zng_writer.wl("//[NEVER]".into());
+                zng_writer.wl("//[NEVER]".into());
                 syn::Type::Never(type_never)
             }
             syn::Type::Paren(type_paren) => {
-                self.zng_writer.wl("//[PAREN]".into());
+                zng_writer.wl("//[PAREN]".into());
                 syn::Type::Paren(type_paren)
             }
             syn::Type::Path(type_path) => {
@@ -1254,24 +1202,24 @@ impl Parser {
                 syn::Type::Reference(type_reference)
             }
             syn::Type::Slice(type_slice) => {
-                self.zng_writer.wl("//[SLICE]".into());
+                zng_writer.wl("//[SLICE]".into());
                 syn::Type::Slice(type_slice)
             }
             syn::Type::TraitObject(type_trait_object) => {
-                self.zng_writer.wl("//[TRAIT_OBJECT]".into());
+                zng_writer.wl("//[TRAIT_OBJECT]".into());
                 syn::Type::TraitObject(type_trait_object)
             }
             syn::Type::Tuple(type_tuple) => {
                 syn::Type::Tuple(type_tuple)
             }
             syn::Type::Verbatim(token_stream) => {
-                self.zng_writer.wl("//[TOKEN_STREAM]".into());
+                zng_writer.wl("//[TOKEN_STREAM]".into());
                 syn::Type::Verbatim(token_stream)
             }
             ty => ty
         })
     }
-    fn parse_impl_item(&mut self, self_ty: Option<&Type>, item: ImplItem, trait_: Option<&Path>, is_extern_cpp: bool, lts: Option<&HashSet<&Ident>>) -> Result<Option<ImplItem>> {
+    fn parse_impl_item(&mut self, zng_writer: &mut ZngWriter, self_ty: Option<&Type>, item: ImplItem, trait_: Option<&Path>, is_extern_cpp: bool, lts: Option<&HashSet<&Ident>>) -> Result<Option<ImplItem>> {
         let self_ident = self_ty.and_then(|ty| match ty {
             Type::Path(type_path) if type_path.path.segments.len() == 1 => {
                 type_path.path.segments.first().map(|s| &s.ident)
@@ -1281,7 +1229,7 @@ impl Parser {
 
         match item {
             ImplItem::Const(impl_item_const) => {
-                self.zng_writer.wl("// (CONST)".into());
+                zng_writer.wl("// (CONST)".into());
                 Ok(Some(syn::ImplItem::Const(impl_item_const)))
             }
             ImplItem::Fn(impl_item_fn) => {
@@ -1290,10 +1238,10 @@ impl Parser {
                 if transfer_type.as_ref().map(|t| matches!(t, TransferType::Import(..))).unwrap_or_default() {
                     Err(Error::new(block.span(), "imports cannot have an implementation".into()))
                 } else if transfer_type == Some(TransferType::Export) {
-                    let prev_disabled = if !is_extern_cpp { None } else { Some(self.zng_writer.disabled) };
-                    if prev_disabled.is_some() { self.zng_writer.disabled = true; }
-                    sig = self.parse_sig(self_ident, sig, lts)?;
-                    prev_disabled.map(|d| self.zng_writer.disabled = d);
+                    let prev_disabled = if !is_extern_cpp { None } else { Some(zng_writer.disabled) };
+                    if prev_disabled.is_some() { zng_writer.disabled = true; }
+                    sig = self.parse_sig(zng_writer, self_ident, sig, lts)?;
+                    prev_disabled.map(|d| zng_writer.disabled = d);
 
                     let block: Block = if let Some(path) = (self.mode == ParseMode::Generate).then(|| self_ident.and_then(|i| self.structs_that_bind.get(i))).flatten() {
                         let mut has_receiver: bool = false;
@@ -1346,7 +1294,7 @@ impl Parser {
                 Ok(Some(syn::ImplItem::Type(impl_item_type)))
             }
             ImplItem::Macro(impl_item_macro) => {
-                self.zng_writer.wl("// (MACRO)".into());
+                zng_writer.wl("// (MACRO)".into());
                 Ok(Some(syn::ImplItem::Macro(impl_item_macro)))
             }
             ImplItem::Verbatim(token_stream) => {
@@ -1355,7 +1303,7 @@ impl Parser {
                     Some(TransferType::Expose) => {
                         let token_stream = remove_semicolon(token_stream)?;
                         let impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                        self.parse_sig(self_ident, impl_fn.sig, lts)?;
+                        self.parse_sig(zng_writer, self_ident, impl_fn.sig, lts)?;
                         Ok(None)
                     }
                     Some(TransferType::Export) => {
@@ -1364,7 +1312,7 @@ impl Parser {
                             let token_stream = remove_semicolon(token_stream)?;
                             let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
                             impl_fn.attrs.push(parse_quote! { #[export] });
-                            self.parse_impl_item(self_ty, ImplItem::Fn(impl_fn), trait_, is_extern_cpp, lts)
+                            self.parse_impl_item(zng_writer, self_ty, ImplItem::Fn(impl_fn), trait_, is_extern_cpp, lts)
                         } else {
                             Ok(Some(ImplItem::Verbatim(token_stream)))
                         }
@@ -1377,7 +1325,7 @@ impl Parser {
                             w.add_lines(modpath, self_ty, trait_, &sig, &lines);
                         }
                         if is_extern_cpp {
-                            sig = self.parse_sig(self_ident, sig, lts)?;
+                            sig = self.parse_sig(zng_writer, self_ident, sig, lts)?;
                         }
                         if self.has_generated || self.mode == ParseMode::Generate {
                             Ok(None)
@@ -1391,32 +1339,98 @@ impl Parser {
                 }
             }
             x => {
-                self.zng_writer.wl("// (UNKNOWN)".into());
+                zng_writer.wl("// (UNKNOWN)".into());
                 Ok(Some(x))
             }
         }
     }
-    fn parse_sig(&mut self, self_ident: Option<&Ident>, sig: Signature, lts: Option<&HashSet<&Ident>>) -> Result<Signature> {
+    fn parse_sig(&mut self, zng_writer: &mut ZngWriter, self_ident: Option<&Ident>, sig: Signature, lts: Option<&HashSet<&Ident>>) -> Result<Signature> {
         let inputs = sig.inputs.iter().map(|i| Ok(match i {
             FnArg::Receiver(receiver) => receiver.to_token_stream(),
             FnArg::Typed(pat_type) => {
-                let ty = self.parse_ty(*pat_type.ty.clone(), lts)?;
-                Self::map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts).to_token_stream()
+                let ty = self.parse_ty(zng_writer, *pat_type.ty.clone(), lts)?;
+                map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts).to_token_stream()
             },
         })).collect::<Result<Punctuated<_, Token![,]>>>()?;
-        self.zng_writer.w(format!("fn {}({})", sig.ident, inputs.to_token_stream()).into());
+        zng_writer.w(format!("fn {}({})", sig.ident, inputs.to_token_stream()).into());
         if let ReturnType::Type(_, ty) = &sig.output {
-            let ty = self.parse_ty(*ty.clone(), lts)?;
-            self.zng_writer.w(match (ty, self_ident) {
+            let ty = self.parse_ty(zng_writer, *ty.clone(), lts)?;
+            zng_writer.w(match (ty, self_ident) {
                 (Type::Path(TypePath { path, .. }), Some(ident)) if path.is_ident("Self") =>
                     format!(" -> {}", ident.to_token_stream()).into(),
                 (ty, _) => {
-                    let ty = Self::map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts);
+                    let ty = map_type_paths(ty, &mut |p| self.fully_qualify_path(p, lts), lts);
                     format!(" -> {}", ty.to_token_stream()).into()
                 }
             });
         }
-        self.zng_writer.wl(";".into());
+        zng_writer.wl(";".into());
         Ok(sig)
+    }
+}
+
+pub struct Parser {
+    state: ParseState,
+    zng_writer: ZngWriter,
+}
+
+impl Parser {
+    pub fn new(additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>) -> Self {
+       Self::with_details(false, additional_includes, prelude_types, false, ParseMode::Generate)
+    }
+    pub fn with_details(has_generated: bool, additional_includes: &Vec<String>, prelude_types: BTreeMap<Ident, Vec<Ident>>, skip_artifacts: bool, mode: ParseMode) -> Self {
+        let mut ret = Self {
+            state: ParseState {
+                has_generated,
+                n: 0,
+                modstack: RefCell::new(vec![]),
+                impls: Default::default(),
+                structs_that_bind: Default::default(),
+                prelude_types: Rc::new(prelude_types),
+                cpp_writer: None,
+                specializations: Default::default(),
+                mode,
+                bind_traits: vec![],
+            },
+            zng_writer: ZngWriter::new(skip_artifacts),
+        };
+        if !additional_includes.is_empty() {
+            ret.zng_writer.wl("#cpp_additional_includes \"".into());
+            for include in additional_includes {
+                ret.zng_writer.wl(include.replace("\\", "\\\\").replace("\"", "\\\"").into());
+            }
+            ret.zng_writer.wl("\"".into());
+        }
+        ret
+    }
+    pub fn set_cpp_writer(&mut self, mut writer: CppWriter) {
+        writer.prelude_types = self.state.prelude_types.clone();
+        self.state.cpp_writer = Some(writer);
+    }
+    pub fn take_cpp_writer(&mut self) -> Option<CppWriter> { self.state.cpp_writer.take() }
+    pub fn parse(&mut self, item: ItemMod) -> Result<Vec<Item>> {
+        let mut structs_that_bind = HashMap::<Ident, Path>::new();
+        let mut impls = HashMap::<Vec<String>, ItemImpl>::new();
+        let item = self.state.collect_impls(item,
+            &mut|ident, path| {
+                structs_that_bind.insert(ident.clone(), path.clone());
+            },
+            &mut |modpath, item_impl| {
+                impls.insert(modpath, item_impl);
+            }
+        )?;
+        self.state.impls = impls;
+        self.state.structs_that_bind = structs_that_bind;
+
+        let items = self.state.parse_mod(&mut self.zng_writer, item)?.and_then(|item|
+            item.content.map(|(_, items)| items)).unwrap_or_default();
+
+        Ok(items)
+    }
+    pub fn output(&mut self) -> Vec<String> {
+        self.zng_writer.output()
+    }
+    pub fn needed_layouts(&self) -> Vec<(Type, usize, usize)> {
+        self.zng_writer.needed_layouts()
     }
 }

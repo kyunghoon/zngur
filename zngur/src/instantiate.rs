@@ -3,6 +3,8 @@ use quote::{quote, ToTokens};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{parse_quote, FnArg, Ident, ImplItem, ImplItemFn, ItemEnum, ItemImpl, ReturnType, Token, Type};
+use crate::parser::map_type_paths;
+
 use super::parser::{Parser, remove_semicolon};
 use super::Result;
 
@@ -63,7 +65,7 @@ impl<'a> Instantiate<'a> {
             ty
         };
         let mp: Punctuated::<_, Token![::]> = self.modpath.iter().map(|s| Ident::new(&s, ty.span())).collect();
-        Parser::map_type_paths(ty, &mut |p| {
+        map_type_paths(ty, &mut |p| {
             if p.leading_colon.is_some() { p } else {
                 parse_quote!(crate::#mp::#p)
             }
