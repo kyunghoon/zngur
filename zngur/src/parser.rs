@@ -605,7 +605,7 @@ impl ParseState {
                     item_enum.attrs.push(parse_quote! { #[repr(u32)] });
                     zng_writer.wl(format!("enum {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
                 } else {
-                    write_enum(&item_enum, enum_modpath, enum_impl, self, zng_writer)?;
+                    write_enum(&item_enum, None, &enum_modpath, enum_impl, self, zng_writer)?;
                 }
             } else {
                 let mut instantiated_items = vec![];
@@ -631,7 +631,7 @@ impl ParseState {
                 }
 
                 for (item, enum_impl, modpath, args) in instantiated_items {
-                    write_enum_2(&item, &*args, &modpath, enum_impl, self, zng_writer)?;
+                    write_enum(&item, Some(&*args), &modpath, enum_impl, self, zng_writer)?;
                 }
             }
         }
@@ -906,120 +906,10 @@ impl ParseState {
             (attrs, self.gensym(), passing_style, self.mode != ParseMode::TypeCheck)
         } else {
             modpath.push(ident.to_token_stream().to_string());
-            zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
-            zng_writer.indent_level += 1;
-            let (attrs, passing_style, should_bind, needs_layout) = self.parse_meta_attributes(zng_writer, attrs)?;
-            if needs_layout && !has_generic_types {
-                zng_writer.layout(ident.to_string());
-            }
-            if let Some(imp) = self.impls.remove(&modpath) {
-                let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
-                match self.mode {
-                    ParseMode::TypeCheck => {
-                        if should_bind {
-                            for item in imp.items.iter() {
-                                if let ImplItem::Fn(impl_fn) = item {
-                                    let (_, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
-                                    if transfer_type == Some(TransferType::Export) {
-                                        let span =     impl_fn.block.brace_token.span.span();
-                                        return Err(Error::new(span, "Syntax Error: bounded export functions cannot have a body".into()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ParseMode::Generate => {
-                        if should_bind {
-                            let mut needs_trait = false;
-                            for i in imp.items.iter() {
-                                match i {
-                                    ImplItem::Fn(f) if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) => {
-                                        needs_trait = true;
-                                        break;
-                                    }
-                                    ImplItem::Verbatim(token_stream) => {
-                                        let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone())?;
-                                        if matches!(transfer_type, Some(TransferType::Export)) {
-                                            let token_stream = remove_semicolon(token_stream)?;
-                                            let f: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                                            if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) {
-                                                needs_trait = true;
-                                                break;
-                                            }
-                                        }
-                                    },
-                                    _ => continue,
-                                }
-                            }
 
-                            if needs_trait {
-                                let mut trait_fns = vec![];
-                                imp.items.iter().map(|item| match item {
-                                    ImplItem::Fn(impl_fn) => {
-                                        let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
-                                        let (attrs, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
-                                        if !is_static && transfer_type == Some(TransferType::Export) {
-                                            trait_fns.push(TraitItemFn {
-                                                attrs,
-                                                sig: impl_fn.sig.clone(),
-                                                default: None,
-                                                semi_token,
-                                            });
-                                        }
-                                        Ok(())
-                                    }
-                                    ImplItem::Verbatim(token_stream) => {
-                                        let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone()).unwrap();
-                                        if matches!(transfer_type, Some(TransferType::Export)) {
-                                            let token_stream = remove_semicolon(token_stream)?;
-                                            let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                                            let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+            let (attrs,  id, passing_style) = write_struct(&ident, has_generic_types, attrs, &modpath, self, zng_writer)?;
+            bind_id = id;
 
-                                            impl_fn.sig.ident = Ident::new(&impl_fn.sig.ident.to_string().to_snake_case(), impl_fn.sig.ident.span());
-                                            impl_fn.sig.inputs = impl_fn.sig.inputs.into_iter().map(|i| {
-                                                match i {
-                                                    FnArg::Typed(mut pat_type) => {
-                                                        pat_type.pat = Box::new(match *pat_type.pat {
-                                                            Pat::Ident(mut pat_id) => {
-                                                                pat_id.ident =
-                                                                    Ident::new(&pat_id.ident.to_string().to_snake_case(), pat_id.ident.span());
-                                                                Pat::Ident(pat_id)
-                                                            }
-                                                            pat => pat
-                                                        });
-                                                        FnArg::Typed(pat_type)
-                                                    }
-                                                    i => i,
-                                                }
-                                            }).collect();
-                                            if !is_static {
-                                                trait_fns.push(TraitItemFn {
-                                                    attrs: impl_fn.attrs,
-                                                    sig: impl_fn.sig.clone(),
-                                                    default: None,
-                                                    semi_token,
-                                                });
-                                            }
-                                        }
-                                        Ok(())
-                                    }
-                                    _ => Ok(())
-                                }).collect::<Result<()>>()?;
-                                let trait_id = Ident::new(&(ident.to_string() + "Trait"), Span::call_site());
-                                let trait_: ItemTrait = parse_quote!{ pub trait #trait_id<'a> { #(#trait_fns)* } };
-                                self.bind_traits.push(trait_);
-                                bind_id = Some(trait_id);
-                            }
-                        }
-                    }
-                }
-
-                for item in imp.items {
-                    self.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
-                }
-            }
-            zng_writer.indent_level -= 1;
-            zng_writer.wl("}".into());
             (attrs, ident, passing_style, false)
         };
         self.declare_type_identifier(&ident);
@@ -1392,18 +1282,31 @@ impl Parser {
     }
 }
 
-fn write_enum_2(item: &ItemEnum, args: &Vec<Type>, enum_modpath: &Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
-    let mp: Punctuated::<_, Token![::]> = enum_modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
-    zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
-        let a = map_type_paths(a.clone(), &mut |p| {
-            if p.leading_colon.is_some() { p } else {
-                parse_quote!(crate::#mp::#p)
-            }
-        }, None);
-        a.to_token_stream().to_string()
-    }).collect::<Vec<_>>().join(", ")).into());
+fn write_enum(item: &ItemEnum, args: Option<&Vec<Type>>, enum_modpath: &Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
+    if let Some(args) = args {
+        let mp: Punctuated::<_, Token![::]> = enum_modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
+        zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
+            let a = map_type_paths(a.clone(), &mut |p| {
+                if p.leading_colon.is_some() { p } else {
+                    parse_quote!(crate::#mp::#p)
+                }
+            }, None);
+            a.to_token_stream().to_string()
+        }).collect::<Vec<_>>().join(", ")).into());
+    } else {
+        zng_writer.wl(format!("type {} {{", item.ident).into());
+    }
     zng_writer.indent_level += 1;
-    zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+    if let Some(args) = args {
+        zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+    } else {
+        let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
+        zng_writer.layout(if is_std {
+            format!(":: {}", enum_modpath.join(" :: "))
+        } else {
+            format!("{}", enum_modpath.join(" :: "))
+        });
+    }
     for variant in item.variants.iter() {
         zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
     }
@@ -1418,25 +1321,123 @@ fn write_enum_2(item: &ItemEnum, args: &Vec<Type>, enum_modpath: &Vec<String>, e
     Ok(())
 }
 
-fn write_enum(item_enum: &ItemEnum, enum_modpath: Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
-    zng_writer.wl(format!("type {} {{", item_enum.ident).into());
+fn write_struct(ident: &Ident, has_generic_types: bool, attrs: Vec<Attribute>, modpath: &Vec<String>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<(Vec<Attribute>, Option<Ident>, Option<CppPassingStyle>)> {
+    let mut bind_id = None;
+    zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
     zng_writer.indent_level += 1;
-    let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
-    zng_writer.layout(if is_std {
-        format!(":: {}", enum_modpath.join(" :: "))
-    } else {
-        format!("{}", enum_modpath.join(" :: "))
-    });
-    for variant in item_enum.variants.iter() {
-        zng_writer.wl(format!("constructor {}{};", variant.ident, variant.fields.to_token_stream()).into());
+
+    let (attrs, passing_style, should_bind, needs_layout) = state.parse_meta_attributes(zng_writer, attrs)?;
+    if needs_layout && !has_generic_types {
+        zng_writer.layout(ident.to_string());
     }
-    if let Some(imp) = enum_impl {
+
+    if let Some(imp) = state.impls.remove(modpath) {
         let trait_ = imp.trait_.as_ref().map(|tr| &tr.1);
+        match state.mode {
+            ParseMode::TypeCheck => {
+                if should_bind {
+                    for item in imp.items.iter() {
+                        if let ImplItem::Fn(impl_fn) = item {
+                            let (_, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
+                            if transfer_type == Some(TransferType::Export) {
+                                let span =     impl_fn.block.brace_token.span.span();
+                                return Err(Error::new(span, "Syntax Error: bounded export functions cannot have a body".into()));
+                            }
+                        }
+                    }
+                }
+            }
+            ParseMode::Generate => {
+                if should_bind {
+                    let mut needs_trait = false;
+                    for i in imp.items.iter() {
+                        match i {
+                            ImplItem::Fn(f) if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) => {
+                                needs_trait = true;
+                                break;
+                            }
+                            ImplItem::Verbatim(token_stream) => {
+                                let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone())?;
+                                if matches!(transfer_type, Some(TransferType::Export)) {
+                                    let token_stream = remove_semicolon(token_stream)?;
+                                    let f: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
+                                    if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) {
+                                        needs_trait = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            _ => continue,
+                        }
+                    }
+
+                    if needs_trait {
+                        let mut trait_fns = vec![];
+                        imp.items.iter().map(|item| match item {
+                            ImplItem::Fn(impl_fn) => {
+                                let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+                                let (attrs, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
+                                if !is_static && transfer_type == Some(TransferType::Export) {
+                                    trait_fns.push(TraitItemFn {
+                                        attrs,
+                                        sig: impl_fn.sig.clone(),
+                                        default: None,
+                                        semi_token: None,
+                                    });
+                                }
+                                Ok(())
+                            }
+                            ImplItem::Verbatim(token_stream) => {
+                                let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone()).unwrap();
+                                if matches!(transfer_type, Some(TransferType::Export)) {
+                                    let token_stream = remove_semicolon(token_stream)?;
+                                    let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
+                                    let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+
+                                    impl_fn.sig.ident = Ident::new(&impl_fn.sig.ident.to_string().to_snake_case(), impl_fn.sig.ident.span());
+                                    impl_fn.sig.inputs = impl_fn.sig.inputs.into_iter().map(|i| {
+                                        match i {
+                                            FnArg::Typed(mut pat_type) => {
+                                                pat_type.pat = Box::new(match *pat_type.pat {
+                                                    Pat::Ident(mut pat_id) => {
+                                                        pat_id.ident =
+                                                            Ident::new(&pat_id.ident.to_string().to_snake_case(), pat_id.ident.span());
+                                                        Pat::Ident(pat_id)
+                                                    }
+                                                    pat => pat
+                                                });
+                                                FnArg::Typed(pat_type)
+                                            }
+                                            i => i,
+                                        }
+                                    }).collect();
+                                    if !is_static {
+                                        trait_fns.push(TraitItemFn {
+                                            attrs: impl_fn.attrs,
+                                            sig: impl_fn.sig.clone(),
+                                            default: None,
+                                            semi_token: None,
+                                        });
+                                    }
+                                }
+                                Ok(())
+                            }
+                            _ => Ok(())
+                        }).collect::<Result<()>>()?;
+                        let trait_id = Ident::new(&(ident.to_string() + "Trait"), Span::call_site());
+                        let trait_: ItemTrait = parse_quote!{ pub trait #trait_id<'a> { #(#trait_fns)* } };
+                        state.bind_traits.push(trait_);
+                        bind_id = Some(trait_id);
+                    }
+                }
+            }
+        }
+
         for item in imp.items {
             state.parse_impl_item(zng_writer, Some(&imp.self_ty), item, trait_, false, None)?;
         }
     }
     zng_writer.indent_level -= 1;
     zng_writer.wl("}".into());
-    Ok(())
+    Ok((attrs, bind_id, passing_style))
 }
