@@ -1,9 +1,10 @@
+use core::num;
 use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, HashMap, HashSet}, rc::Rc};
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
-use crate::{instantiate::Instantiate, CppWriter};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypeArray, TypeBareFn, TypeGroup, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple, Visibility};
+use crate::{instantiate::{Instantiatable, Instantiate}, CppWriter};
 use super::{Result, Error};
 
 const META_TYPE_NAME: &'static str = "_Type";
@@ -621,30 +622,9 @@ impl ParseState {
                     write_enum(&item_enum, None, &enum_modpath, enum_impl, self, zng_writer)?;
                 }
             } else {
-                let mut instantiated_items = vec![];
-                if let Some(specializations) = self.specializations.get(&item_enum.ident) {
-                    let mut specializations = specializations.iter().collect::<Vec<_>>();
-                    specializations.sort();
-                    for s in specializations.iter() {
-                        let params = item_enum.generics.params.iter().filter_map(|p| match p {
-                            GenericParam::Type(type_param) => Some(&type_param.ident),
-                            _ => None
-                        }).collect::<Vec<_>>();
-                        if !s.args.is_empty() && params.len() != s.args.len() {
-                            return Err(Error::new(item_enum.span(), "invalid number of generic arguments".into()));
-                        }
-
-                        let env = params.into_iter().zip(s.args.iter()).collect::<HashMap<_, _>>();
-                        let inst = Instantiate::new(&*s.modpath, &env);
-                        if let Some(item) = inst.item_enum(&item_enum) {
-                            let enum_impl = enum_impl.as_ref().map(|i| inst.item_impl(i)).transpose()?;
-                            instantiated_items.push((item, enum_impl, s.modpath.clone(), s.args.clone()));
-                        }
-                    }
-                }
-
-                for (item, enum_impl, modpath, args) in instantiated_items {
-                    write_enum(&item, Some(&*args), &modpath, enum_impl, self, zng_writer)?;
+                let instantiated_items = get_instantiated_items(&item_enum, enum_impl, &self.specializations)?;
+                for (item, item_impl, modpath, args) in instantiated_items {
+                    write_enum(&item, Some(&*args), &modpath, item_impl, self, zng_writer)?;
                 }
             }
         }
@@ -792,7 +772,7 @@ impl ParseState {
         zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: Vec<ZngurAttribute>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
+    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: &Vec<ZngurAttribute>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
         let mut should_bind = false;
@@ -927,21 +907,21 @@ impl ParseState {
         Ok((attrs, zng_attrs))
     }
 
-    fn parse_struct(&mut self, zng_writer: &mut ZngWriter, item: ItemStruct) -> Result<Option<ItemStruct>> {
-        let ItemStruct { attrs, vis, struct_token, ident, generics, fields, semi_token } = item;
-        let has_generic_types = generics.type_params().peekable().next().is_some();
+    fn parse_struct(&mut self, zng_writer: &mut ZngWriter, mut item: ItemStruct) -> Result<Option<ItemStruct>> {
+        let num_generics = item.generics.type_params().count();
         let mut bind_id = None;
         let mut modpath = self.modpath();
-        let (attrs, ident, passing_style, is_meta_type) = if ident == META_TYPE_NAME {
-            let span = fields.span();
-            let (1, Some(syn::Field { ident: None, ty , .. })) = (fields.len(), fields.iter().next()) else { return Err(Error::new(span, "expects a single field".into())); };
+        let (passing_style, is_meta_type) = if item.ident == META_TYPE_NAME {
+            let span = item.fields.span();
+            let (1, Some(syn::Field { ident: None, ty , .. })) = (item.fields.len(), item.fields.iter().next()) else { return Err(Error::new(span, "expects a single field".into())); };
             let ty = map_type_paths(ty.clone(), &mut |p| self.fully_qualify_path(p, None), None);
             modpath.push(ty.to_token_stream().to_string());
             zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
             zng_writer.indent_level += 1;
-            let (attrs, zng_attrs) = self.parse_meta_attributes(attrs)?;
-            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
-            if needs_layout && !has_generic_types {
+            let (attrs, zng_attrs) = self.parse_meta_attributes(item.attrs)?;
+            item.attrs = attrs;
+            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, &zng_attrs)?;
+            if needs_layout && num_generics == 0 {
                 zng_writer.layout(ty.to_token_stream().to_string());
             }
             if let Some(imp) = self.impls.remove(&modpath) {
@@ -952,17 +932,40 @@ impl ParseState {
             }
             zng_writer.indent_level -= 1;
             zng_writer.wl("}".into());
-            (attrs, self.gensym(), passing_style, self.mode != ParseMode::TypeCheck)
+            item.ident = self.gensym();
+            (passing_style, self.mode != ParseMode::TypeCheck)
         } else {
-            modpath.push(ident.to_token_stream().to_string());
+            modpath.push(item.ident.to_token_stream().to_string());
 
-            let (attrs, zng_attrs) = self.parse_meta_attributes(attrs)?;
+            let (attrs, zng_attrs) = self.parse_meta_attributes(item.attrs)?;
+            item.attrs = attrs;
 
-            let (id, passing_style) = write_struct(&ident, has_generic_types, zng_attrs, &modpath, self, zng_writer)?;
+            let disabled = zng_writer.disabled;
+            if num_generics > 0 { zng_writer.disabled = true; }
+            let (id, passing_style) = write_struct(&item.ident, num_generics, None, &zng_attrs, &modpath, None, self, zng_writer)?;
+            zng_writer.disabled = disabled;
+
             bind_id = id;
 
-            (attrs, ident, passing_style, false)
+            let struct_modpath = {
+                let mut modpath = self.modpath();
+                modpath.push(item.ident.to_string());
+                modpath
+            };
+            let struct_impl = self.impls.remove(&struct_modpath);
+
+            if num_generics > 0 {
+                let instantiated_items = get_instantiated_items(&item, struct_impl, &self.specializations)?;
+                println!(">>>> NUM-GEN-STRUCTS: {}", instantiated_items.len());
+                for (item, item_impl, modpath, args) in instantiated_items {
+                    write_struct(&item.ident, num_generics, Some(&*args), &zng_attrs, &modpath, item_impl, self, zng_writer)?;
+                }
+            }
+
+            (passing_style, false)
         };
+
+        let ItemStruct { attrs, vis, struct_token, ident, generics, fields, semi_token } = item;
         self.declare_type_identifier(&ident);
         if let Some(trait_ident) = bind_id {
             Ok(Some(parse_quote! {
@@ -1333,9 +1336,9 @@ impl Parser {
     }
 }
 
-fn write_enum(item: &ItemEnum, args: Option<&Vec<Type>>, enum_modpath: &Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
-    if let Some(args) = args {
-        let mp: Punctuated::<_, Token![::]> = enum_modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
+fn write_enum(item: &ItemEnum, type_args: Option<&Vec<Type>>, modpath: &Vec<String>, enum_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<()> {
+    if let Some(args) = type_args {
+        let mp: Punctuated::<_, Token![::]> = modpath.iter().map(|s| Ident::new(&s, item.span())).collect();
         zng_writer.wl(format!("type {} < {} > {{", item.ident, args.iter().map(|a| {
             let a = map_type_paths(a.clone(), &mut |p| {
                 if p.leading_colon.is_some() { p } else {
@@ -1348,14 +1351,14 @@ fn write_enum(item: &ItemEnum, args: Option<&Vec<Type>>, enum_modpath: &Vec<Stri
         zng_writer.wl(format!("type {} {{", item.ident).into());
     }
     zng_writer.indent_level += 1;
-    if let Some(args) = args {
+    if let Some(args) = type_args {
         zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
     } else {
-        let is_std = enum_modpath.first().map(|s| s == "std").unwrap_or_default();
+        let is_std = modpath.first().map(|s| s == "std").unwrap_or_default();
         zng_writer.layout(if is_std {
-            format!(":: {}", enum_modpath.join(" :: "))
+            format!(":: {}", modpath.join(" :: "))
         } else {
-            format!("{}", enum_modpath.join(" :: "))
+            format!("{}", modpath.join(" :: "))
         });
     }
     for variant in item.variants.iter() {
@@ -1372,13 +1375,13 @@ fn write_enum(item: &ItemEnum, args: Option<&Vec<Type>>, enum_modpath: &Vec<Stri
     Ok(())
 }
 
-fn write_struct(ident: &Ident, has_generic_types: bool, zng_attrs: Vec<ZngurAttribute>, modpath: &Vec<String>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<(Option<Ident>, Option<CppPassingStyle>)> {
+fn write_struct(ident: &Ident, num_generics: usize, type_args: Option<&Vec<Type>>, zng_attrs: &Vec<ZngurAttribute>, modpath: &Vec<String>, struct_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter) -> Result<(Option<Ident>, Option<CppPassingStyle>)> {
     let mut bind_id = None;
     zng_writer.wl(format!("type {} {{", ident.to_token_stream()).into());
     zng_writer.indent_level += 1;
 
-    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, zng_attrs)?;
-    if needs_layout && !has_generic_types {
+    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, &zng_attrs)?;
+    if needs_layout && type_args.is_none() {
         zng_writer.layout(ident.to_string());
     }
 
@@ -1491,4 +1494,26 @@ fn write_struct(ident: &Ident, has_generic_types: bool, zng_attrs: Vec<ZngurAttr
     zng_writer.indent_level -= 1;
     zng_writer.wl("}".into());
     Ok((bind_id, passing_style))
+}
+
+fn get_instantiated_items<I: Instantiatable>(item_enum: &I, enum_impl: Option<ItemImpl>, specializations: &HashMap<Ident, HashSet<Specialization>>) -> Result<Vec<(I, Option<ItemImpl>, Rc<Vec<String>>, Rc<Vec<syn::Type>>)>> {
+    let mut instantiated_items = vec![];
+    if let Some(specializations) = specializations.get(&item_enum.ident()) {
+        let mut specializations = specializations.iter().collect::<Vec<_>>();
+        specializations.sort();
+        for s in specializations.iter() {
+            let params = item_enum.generics().params.iter().filter_map(|p| match p {
+                GenericParam::Type(type_param) => Some(&type_param.ident),
+                _ => None
+            }).collect::<Vec<_>>();
+            if !s.args.is_empty() && params.len() != s.args.len() {
+                return Err(Error::new(item_enum.get_span(), "invalid number of generic arguments".into()));
+            }
+
+            if let Some((item, enum_impl)) = item_enum.instantiate(&params, &s.args, &s.modpath, enum_impl.as_ref())? {
+                instantiated_items.push((item, enum_impl, s.modpath.clone(), s.args.clone()));
+            }
+        }
+    }
+    Ok(instantiated_items)
 }
