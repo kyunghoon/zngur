@@ -405,7 +405,7 @@ impl ParseState {
                     },
                 };
                 if let Some(specializations) = self.specializations.as_mut() {
-                    let inserted = match specializations.entry(seg.ident.clone()) {
+                    let _inserted = match specializations.entry(seg.ident.clone()) {
                         Entry::Occupied(mut occupied_entry) =>
                             occupied_entry.get_mut().insert(s),
                         Entry::Vacant(vacant_entry) => {
@@ -415,16 +415,16 @@ impl ParseState {
                             true
                         }
                     };
-                    if inserted {
-                        // if self.prelude_types.get(&seg.ident).is_none() {
-                            println!("added spec: `{:?}` {}<{}> `{}`",
-                                path.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join("::"),
-                                seg.ident,
-                                args.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(", "),
-                                self.modpath().join("::"),
-                            );
-                        // }
-                    }
+                    // if inserted {
+                    //     // if self.prelude_types.get(&seg.ident).is_none() {
+                    //         println!("added spec: `{:?}` {}<{}> `{}`",
+                    //             path.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join("::"),
+                    //             seg.ident,
+                    //             args.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(", "),
+                    //             self.modpath().join("::"),
+                    //         );
+                    //     // }
+                    // }
                 }
             }
         }
@@ -1394,21 +1394,10 @@ impl Parser {
         )?;
         if let Some(builder) = tenv_builder.take() {
             let type_env = builder.build();
-            for (p, idents) in &type_env.lookup {
-                println!("cargo:warning=LOOKUP: {} [{}]",
-                    p.to_token_stream(),
-                    idents.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")
-                );
-            }
-            for (ident, p) in &type_env.preludes {
-                println!("cargo:warning=PRELUDE: {} [{}]", ident, p.to_token_stream());
-            }
             self.state.type_env = Some(type_env);
         }
         self.state.impls = impls;
         self.state.structs_that_bind = structs_that_bind;
-
-        println!("cargo:warning=PRE-PARSING");
 
         let items = self.state.parse_mod(&mut self.zng_writer, item)?.and_then(|item|
             item.content.map(|(_, items)| items)).unwrap_or_default();
@@ -1450,7 +1439,7 @@ impl Parser {
 fn get_instantiated_items<I: Instantiatable>(item: &I, item_impl: Option<&ItemImpl>, specializations: &HashMap<Ident, HashSet<Specialization>>) -> Result<Vec<(I, Option<ItemImpl>, Rc<Vec<String>>, Rc<Option<Path>>, Rc<Vec<syn::Type>>)>> {
     let mut instantiated_items = vec![];
     if let Some(specializations) = specializations.get(&item.ident()) {
-        println!("getting specializations: {} ({})", item.ident(), specializations.len());
+        //println!("getting specializations: {} ({})", item.ident(), specializations.len());
         let mut specializations = specializations.iter().collect::<Vec<_>>();
         specializations.sort_by_key(|s| s.seq_num);
         for s in specializations.iter() {
