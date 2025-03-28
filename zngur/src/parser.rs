@@ -257,6 +257,24 @@ fn extract_transfer_type_from_attributes(attrs: Vec<Attribute>) -> Result<(Vec<A
     }).collect::<Vec<_>>();
     Ok((attrs, ty))
 }
+fn extract_cpp_template_args(attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<LitStr>)> {
+    // Impl blocks either have no attributes or a simple `#[cpp_template(...)]` attribute
+    let mut cpp_meta_list_args = None;
+    let attrs = attrs.into_iter().filter_map(|attr| match &attr.meta {
+        Meta::List(meta_list) if meta_list.path.is_ident("cpp_template") => {
+            cpp_meta_list_args = Some(meta_list.parse_args_with(Punctuated::<LitStr, syn::Token![,]>::parse_terminated));
+            None
+        }
+        _ => Some(attr),
+    }).collect::<Vec<_>>();
+    if let Some(attr) = attrs.first() {
+        return Err(Error::new(attr.span(), "unexpected attribute".into()));
+    }
+    let template_args = cpp_meta_list_args.transpose()?.map_or_else(Vec::new, |lits|
+        lits.into_iter().map(|l| l).collect());
+    Ok((attrs, template_args))
+}
+
 
 #[derive(Debug)]
 struct Specialization {
@@ -707,9 +725,9 @@ impl ParseState {
     }
     fn parse_impl(&mut self, zng_writer: &mut ZngWriter, item: ItemImpl, is_extern_cpp: bool) -> Result<Option<ItemImpl>> {
         let ItemImpl { attrs, defaultness, unsafety, impl_token, generics, trait_, self_ty, brace_token, items } = item;
-        if let Some(attr) = attrs.first() {
-            return Err(Error::new(attr.span(), "unexpected attribute".into()));
-        }
+
+        let (attrs, _) = extract_cpp_template_args(attrs)?;
+
         zng_writer.w("impl".into());
         // LT OK
         let lifetimes = generics.lifetimes().collect::<Punctuated<_, Token![,]>>();
@@ -809,7 +827,7 @@ impl ParseState {
         zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: &Vec<ZngurAttribute>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
+    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: &Vec<ZngurAttribute>, template_args: Vec<(LitStr, &Ident)>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
         let mut should_bind = false;
@@ -842,7 +860,11 @@ impl ParseState {
                     let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
                         return Err(Error::new(span, "invalid cpp_value token".into()))
                     }; 
-                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
+                    let mut cpp_value = b.value();
+                    for (v, p) in template_args.iter() {
+                        cpp_value = cpp_value.replace(&format!("{{{}}}", p.to_token_stream()), &v.value());
+                    }
+                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), cpp_value).into());
                     passing_style = Some(CppPassingStyle::Value);
                 },
                 ZngurAttribute::RustValue(meta_list) => {
@@ -969,7 +991,7 @@ impl ParseState {
             zng_writer.indent_level += 1;
             let (attrs, zng_attrs) = self.parse_meta_attributes(item.attrs)?;
             item.attrs = attrs;
-            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, &zng_attrs)?;
+            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, &zng_attrs, vec![])?;
             if needs_layout && num_generics == 0 {
                 zng_writer.layout(ty.to_token_stream().to_string());
             }
@@ -1420,13 +1442,13 @@ impl Parser {
                     Inst::Enum(item_enum, item_impl, item_modpath, lts) => {
                         let instantiated_items = get_instantiated_items(&item_enum, item_impl.as_ref(), &specializations)?;
                         for (item, item_impl, modpath, real_modpath, args) in instantiated_items {
-                            write_enum(&item, Some(&*args), self.state.real_modpath().as_ref(), (*real_modpath).as_ref(), Some(&item_modpath), &modpath, item_impl, &mut self.state, &mut self.zng_writer, lts.as_ref())?;
+                            write_enum(&item, Some(&args), self.state.real_modpath().as_ref(), (*real_modpath).as_ref(), Some(&item_modpath), &modpath, item_impl, &mut self.state, &mut self.zng_writer, lts.as_ref())?;
                         }
                     }
                     Inst::Struct(item_struct, item_impl, _item_modpath, zng_attrs, lts) => {
                         let instantiated_items = get_instantiated_items(&item_struct, item_impl.as_ref(), &specializations)?;
                         for (item, item_impl, modpath, real_modpath, args) in instantiated_items {
-                            write_struct(&item, Some(&*args), self.state.real_modpath().as_ref(), (*real_modpath).as_ref(), item_impl, &zng_attrs, &mut self.state, &mut self.zng_writer, lts.as_ref())?;
+                            write_struct(&item, Some(&args), self.state.real_modpath().as_ref(), (*real_modpath).as_ref(), item_impl, &zng_attrs, &mut self.state, &mut self.zng_writer, lts.as_ref())?;
                         }
                     }
                 }
@@ -1436,7 +1458,7 @@ impl Parser {
     }
 }
 
-fn get_instantiated_items<I: Instantiatable>(item: &I, item_impl: Option<&ItemImpl>, specializations: &HashMap<Ident, HashSet<Specialization>>) -> Result<Vec<(I, Option<ItemImpl>, Rc<Vec<String>>, Rc<Option<Path>>, Rc<Vec<syn::Type>>)>> {
+fn get_instantiated_items<I: Instantiatable>(item: &I, item_impl: Option<&ItemImpl>, specializations: &HashMap<Ident, HashSet<Specialization>>) -> Result<Vec<(I, Option<ItemImpl>, Rc<Vec<String>>, Rc<Option<Path>>, Vec<(syn::Type, Ident)>)>> {
     let mut instantiated_items = vec![];
     if let Some(specializations) = specializations.get(&item.ident()) {
         //println!("getting specializations: {} ({})", item.ident(), specializations.len());
@@ -1444,7 +1466,7 @@ fn get_instantiated_items<I: Instantiatable>(item: &I, item_impl: Option<&ItemIm
         specializations.sort_by_key(|s| s.seq_num);
         for s in specializations.iter() {
             let params = item.generics().params.iter().filter_map(|p| match p {
-                GenericParam::Type(type_param) => Some(&type_param.ident),
+                GenericParam::Type(type_param) => Some(type_param.ident.clone()),
                 _ => None
             }).collect::<Vec<_>>();
             if !s.args.is_empty() && params.len() != s.args.len() {
@@ -1452,14 +1474,17 @@ fn get_instantiated_items<I: Instantiatable>(item: &I, item_impl: Option<&ItemIm
             }
 
             if let Some((item, enum_impl)) = item.instantiate(&params, &s.args, &s.modpath, item_impl)? {
-                instantiated_items.push((item, enum_impl, s.modpath.clone(), s.real_modpath.clone(), s.args.clone()));
+                instantiated_items.push((
+                    item, enum_impl, s.modpath.clone(), s.real_modpath.clone(),
+                    s.args.iter().zip(params.into_iter()).map(|(a, b)| (a.clone(), b)).collect()
+                ));
             }
         }
     }
     Ok(instantiated_items)
 }
 
-fn write_enum(item: &ItemEnum, type_args: Option<&Vec<Type>>, from_full: Option<&Path>, to_full: Option<&Path>, item_modpath: Option<&Vec<String>>, modpath: &Vec<String>, item_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter, lts: Option<&HashSet<Ident>>) -> Result<()> {
+fn write_enum(item: &ItemEnum, type_args: Option<&Vec<(Type, Ident)>>, from_full: Option<&Path>, to_full: Option<&Path>, item_modpath: Option<&Vec<String>>, modpath: &Vec<String>, item_impl: Option<ItemImpl>, state: &mut ParseState, zng_writer: &mut ZngWriter, lts: Option<&HashSet<Ident>>) -> Result<()> {
     let tp: Type = types::from_fully_qualified(
         types::to_fully_qualified(
             types::to_type(&item.ident, type_args),
@@ -1468,7 +1493,7 @@ fn write_enum(item: &ItemEnum, type_args: Option<&Vec<Type>>, from_full: Option<
     zng_writer.wl(format!("type {} {{", tp.to_token_stream()).into());
     zng_writer.indent_level += 1;
     if let Some(args) = type_args {
-        zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+        zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|(a, _)| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
     } else {
         let is_std = modpath.first().map(|s| s == "std").unwrap_or_default();
         zng_writer.layout(if is_std {
@@ -1491,7 +1516,7 @@ fn write_enum(item: &ItemEnum, type_args: Option<&Vec<Type>>, from_full: Option<
     Ok(())
 }
 
-fn write_struct(item: &ItemStruct, type_args: Option<&Vec<Type>>, from_full: Option<&Path>, to_full: Option<&Path>, item_impl: Option<ItemImpl>, zng_attrs: &Vec<ZngurAttribute>, state: &mut ParseState, zng_writer: &mut ZngWriter, lts: Option<&HashSet<Ident>>) -> Result<(Option<Ident>, Option<CppPassingStyle>)> {
+fn write_struct(item: &ItemStruct, type_args: Option<&Vec<(Type, Ident)>>, from_full: Option<&Path>, to_full: Option<&Path>, mut item_impl: Option<ItemImpl>, zng_attrs: &Vec<ZngurAttribute>, state: &mut ParseState, zng_writer: &mut ZngWriter, lts: Option<&HashSet<Ident>>) -> Result<(Option<Ident>, Option<CppPassingStyle>)> {
     let tp: Type = types::from_fully_qualified(
         types::to_fully_qualified(
             types::to_type(&item.ident, type_args),
@@ -1500,10 +1525,26 @@ fn write_struct(item: &ItemStruct, type_args: Option<&Vec<Type>>, from_full: Opt
     zng_writer.wl(format!("type {} {{", tp.to_token_stream()).into());
     zng_writer.indent_level += 1;
 
-    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, &zng_attrs)?;
+    let mut template_args = vec![];
+    if let Some(mut imp) = item_impl {
+        let (attrs, tmpl_vals) = extract_cpp_template_args(imp.attrs)?;
+        if let Some(ty_args) = type_args {
+            if let Some(span) = tmpl_vals.first().map(|t| t.span()).or_else(|| ty_args.first().map(|(_, i)| i.span())) {
+                if tmpl_vals.len() != ty_args.len() {
+                    return Err(Error::new(span, "template argument mismatch".into()));
+                }
+                let targs = tmpl_vals.into_iter().zip(ty_args.iter().map(|(_, i)| i)).collect::<Vec<_>>();
+                template_args = targs;
+            }
+        }
+        imp.attrs = attrs;
+        item_impl = Some(imp);
+    }
+
+    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, &zng_attrs, template_args)?;
     if needs_layout {
         if let Some(args) = type_args {
-            zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|a| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
+            zng_writer.layout(format!("{} < {} > ", item.ident, args.iter().map(|(a, _)| a.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
         } else {
             zng_writer.layout(item.ident.to_string());
         }

@@ -77,8 +77,8 @@ pub trait Instantiatable : Sized {
     fn get_span(&self) -> Span;
     fn ident(&self) -> &Ident;
     fn generics(&self) -> &Generics;
-    fn instantiate(&self, params: &Vec<&Ident>, args: &Vec<Type>, modpath: &Vec<String>, imp: Option<&ItemImpl>) -> Result<Option<(Self, Option<ItemImpl>)>> {
-        let env = params.iter().map(|i| *i).zip(args.iter()).collect::<HashMap<_, _>>();
+    fn instantiate(&self, params: &Vec<Ident>, args: &Vec<Type>, modpath: &Vec<String>, imp: Option<&ItemImpl>) -> Result<Option<(Self, Option<ItemImpl>)>> {
+        let env = params.iter().map(|i| i).zip(args.iter()).collect::<HashMap<_, _>>();
         let inst = Instantiate::new(modpath, &env);
         if let Some(item) = self.instantiate_type(&inst) {
             let instantiated_impl = imp.map(|i| self.instantiate_impl(&inst, i)).transpose()?;

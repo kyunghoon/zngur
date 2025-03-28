@@ -248,9 +248,9 @@ pub fn map_type_paths(ty: Type, on_typepath: &mut impl FnMut(TypePath) -> TypePa
     }
 }
 
-pub fn to_type(ident: &Ident, type_args: Option<&Vec<Type>>) -> Type {
+pub fn to_type(ident: &Ident, type_args: Option<&Vec<(Type, Ident)>>) -> Type {
     if let Some(args) = type_args {
-        let args: Punctuated<_, Token![,]> = args.into_iter().collect();
+        let args: Punctuated<_, Token![,]> = args.into_iter().map(|(t, _)| t).collect();
         parse_quote!{ #ident<#args> }
     } else {
         parse_quote!{ #ident }
