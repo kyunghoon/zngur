@@ -98,6 +98,35 @@ impl ZngWriter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TransferType { Import(Option<Vec<String>>), Export, Expose }
 
+fn impl_pathsegment(self_ty: &Type) -> Result<PathSegment> {
+    let span = self_ty.span();
+    let syn::Type::Path(type_path) = &self_ty else { return Err(Error::new(span, "invalid type".into())); };
+    for seg in &type_path.path.segments {
+        let PathSegment { ident, arguments } = seg;
+        match arguments {
+            PathArguments::None => {
+                return Ok(parse_quote!(#ident));
+            },
+            PathArguments::AngleBracketed(args) if ident == META_TYPE_NAME && args.args.len() == 1 => {
+                let arg = args.args.first().unwrap();
+                return Ok(parse_quote!(#arg));
+            }
+            PathArguments::AngleBracketed(args) => {
+                let tys = args.args.iter().filter_map(|arg| match arg {
+                    GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                }).collect::<Punctuated<_, Token![,]>>();
+                if tys.is_empty() {
+                    return Ok(parse_quote!(#ident));
+                } else {
+                    return Ok(parse_quote!(#ident<#tys>));
+                }
+            }
+            _ => continue
+        }
+    }
+    Err(Error::new(span, "invalid argument".into()))
+}
 fn impl_typename(self_ty: &Type) -> Result<String> {
     let span = self_ty.span();
     let syn::Type::Path(type_path) = &self_ty else { return Err(Error::new(span, "invalid type".into())); };
@@ -350,9 +379,7 @@ impl ParseState {
             let modpath: Punctuated<_, Token![::]> = self.modpath().into_iter().map(|m| Ident::new(&m, p.span())).collect();
             let newpath: Path = parse_quote!{ #modpath::#p };
             let key = newpath.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>();
-            if self.impls.get(&key).is_some() {
-                p
-            } else {
+            if self.impls.get(&key).is_some() { p } else {
                 let mut segments = p.segments.into_iter().collect::<Vec<_>>();
                 if let Some(mut s) = segments.pop() {
                     s.arguments = match s.arguments {
@@ -543,6 +570,10 @@ impl ParseState {
                     Ok(Item::Enum(item_enum))
                 }
                 Item::Impl(item_impl) if item_impl.trait_.is_none() => {
+                    if let Some(mut p) = self.real_modpath() {
+                        p.segments.push(impl_pathsegment(&*&item_impl.self_ty)?);
+                        println!("cargo:warning=WAKKA {}", p.to_token_stream());
+                    }
                     let mut modpath = self.modpath();
                     modpath.push(impl_typename(&*item_impl.self_ty)?);
                     on_impl(modpath, item_impl.clone());
