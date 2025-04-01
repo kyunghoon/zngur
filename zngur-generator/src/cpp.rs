@@ -1512,7 +1512,10 @@ namespace rust {
         ::std::cerr << "[" << file_name << ":" << line_number << "] " << exp << " = ";
         zngur_pretty_print<typename ::std::remove_reference<T>::type>(input);
         return ::std::forward<T>(input);
-    }"#;
+    }
+    template<> inline size_t __zngur_internal_size_of<unsigned char*>() { return sizeof(unsigned char*); }
+    template<> inline size_t __zngur_internal_size_of<const unsigned char*>() { return sizeof(const unsigned char*); }
+    "#;
         for (ty, ok_for_android) in [8, 16, 32, 64]
             .into_iter()
             .flat_map(|x| [(format!("int{x}_t"), true), (format!("uint{x}_t"), true)])

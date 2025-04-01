@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::{BTreeMap, HashSet}, rc::Rc};
 use quote::ToTokens;
-use syn::{FnArg, GenericArgument, Ident, Path, PathArguments, PathSegment, ReturnType, Signature, Type, TypeParamBound};
+use syn::{FnArg, GenericArgument, Ident, Path, PathArguments, PathSegment, ReturnType, Signature, Type, TypeParamBound, TypePtr};
 
 pub struct CppWriter {
     lines: Vec<String>,
@@ -157,7 +157,12 @@ impl CppWriter {
                     Type::Paren(t) => format!("TY8[{}]", t.to_token_stream()),
                     Type::Path(t) if t.path.is_ident("Self") && self.self_ty.is_some() => self.ty(self.self_ty.unwrap()),
                     Type::Path(t) => self.path(&t.path),
-                    Type::Ptr(t) => format!("TY10[{}]", t.to_token_stream()),
+                    Type::Ptr(TypePtr { mutability, elem, .. }) => {
+                        format!("{}{}*",
+                            self.ty(&*elem),
+                            if mutability.is_some() { "" } else { " const" },
+                        )
+                    },
                     Type::Reference(t) => format!("{}<{}>", if t.mutability.is_some() { "RefMut" } else { "Ref" }, self.ty(&*t.elem)),
                     Type::Slice(t) => format!("Slice<{}>", self.ty(&*t.elem)),
                     Type::TraitObject(t) => {
