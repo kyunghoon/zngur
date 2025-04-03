@@ -1459,6 +1459,8 @@ template<typename T, typename Enable = void> struct ToRust {};
 template<typename T> struct __zngur__to_rust { typedef T type; };
 template<typename T> struct __zngur__from_rust { typedef T type; };
 
+template<typename T> struct Val : public T {};// { typedef T type; T value; };
+
 namespace rust {
     template<typename T> uint8_t* __zngur_internal_data_ptr(const T& t);
     template<typename T> void __zngur_internal_assume_init(T& t);

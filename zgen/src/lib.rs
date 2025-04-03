@@ -123,7 +123,6 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-
     if let Some(path) = &full_rs_debug_output_path {
         let items = items.clone();
         let ts = quote! {
