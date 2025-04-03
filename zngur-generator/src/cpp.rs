@@ -1459,7 +1459,7 @@ template<typename T, typename Enable = void> struct ToRust {};
 template<typename T> struct __zngur__to_rust { typedef T type; };
 template<typename T> struct __zngur__from_rust { typedef T type; };
 
-template<typename T> struct Val : public T {};// { typedef T type; T value; };
+template<typename T> struct Val : public T {};
 
 namespace rust {
     template<typename T> uint8_t* __zngur_internal_data_ptr(const T& t);
@@ -1567,6 +1567,15 @@ namespace rust {
             if !ok_for_android { write!(state, "\n#endif // !PLATFORM_ANDROID\n")?; }
         }
         writeln!(state, "}}")?;
+
+        writeln!(state, "
+namespace to {{
+    // template<typename T> using cref = ::std::cref<T>;
+    // template<typename T> using ref = ::std::ref<T>;
+    template<typename T> ::rust::ZngurCppOpaqueOwnedObject val(T&& t) {{
+        return ::rust::ZngurCppOpaqueOwnedObject::build<T>(t);
+    }}
+}}")?;
 
         // TODO: this section needs deduping, but c++ doesn't seem to mind
         self.emit_links(&mut EmitMode::Cpp(state, state.hotreload))?;
