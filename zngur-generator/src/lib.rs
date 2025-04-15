@@ -1,4 +1,5 @@
 use std::collections::hash_map::Entry;
+use std::collections::HashSet;
 
 use cpp::cpp_handle_keyword;
 use cpp::CppExportedFnDefinition;
@@ -37,6 +38,12 @@ impl ZngurGenerator {
 
     pub fn render(self) -> (String, String, Option<String>) {
         let zng = self.0;
+
+        let owned_types = zng.types.iter().filter_map(|ty_def| match &ty_def.ty {
+            RustType::Adt(RustPathAndGenerics { path, .. }) if ty_def.cpp_value.is_some() => Some(path.clone()),
+            _ => None
+        }).collect::<HashSet<_>>();
+
         let mut cpp_file = CppFile::default();
         cpp_file.additional_includes = zng.additional_includes;
         let mut rust_file = RustFile::default();
@@ -231,6 +238,7 @@ impl ZngurGenerator {
                 impl_block.tr.as_ref(),
                 &impl_block.methods,
                 &impl_block.lifetimes,
+                &owned_types,
             );
             cpp_file.exported_impls.push(CppExportedImplDefinition {
                 tr: impl_block.tr.map(|x| x.into_cpp()),
