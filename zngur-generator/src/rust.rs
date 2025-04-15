@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write};
+use std::{borrow::Cow, collections::HashSet, fmt::Write};
 
 use itertools::Itertools;
 
@@ -192,6 +192,9 @@ r#"#[allow(dead_code)] mod zngur_types {
     impl ZngurCppOpaqueOwnedObject {
         pub unsafe fn new(data: *mut u8, destructor: extern "C" fn(*mut u8)) -> Self { Self { data, destructor } }
         pub fn ptr(&self) -> *mut u8 { self.data }
+        pub fn is_owned(&self) -> bool { unsafe { std::mem::transmute::<_, usize>(self.data) % 2 != 0 } }
+        pub fn inner<T>(&self) -> Option<&T> { if !self.is_owned() { None } else { Some(unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }) } }
+        pub fn unmark_owned(&mut self) -> &mut Self { if self.is_owned() { self.data = unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }; } self }
     }
     impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { (self.destructor)(self.data) } }
 }
@@ -535,6 +538,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         tr: Option<&RustTrait>,
         methods: &[ZngurMethod],
         lifetimes: &[String],
+        owned_types: &HashSet<Vec<String>>,
     ) -> Vec<String> {
         let mangled_names = if self.hotreload {
             let mut mangled_names = vec![];
@@ -613,7 +617,12 @@ impl {owner}{owner_lts} {{"#,
             self.indent_inc();
             self.indent_inc();
             if method.receiver != ZngurMethodReceiver::Static {
-                w!(self, "\n        let i0 = self;");
+                let is_owned = if let RustType::Adt(RustPathAndGenerics { path, .. }) = &owner { owned_types.get(path).is_some() } else { false };
+                if is_owned && method.receiver != ZngurMethodReceiver::Move {
+                    w!(self, "\n        let i0: &Self = self.0.inner().unwrap_or(self);");
+                } else {
+                    w!(self, "\n        let i0 = self;");
+                }
             }
             self.call_cpp_function(mn, None, method.inputs.len() + input_offset);
             self.indent_dec();
@@ -655,7 +664,7 @@ pub(crate) fn {rust_name}("#
     pub fn add_cpp_value_bridge(&mut self, ty: &RustType, field: &str) -> String {
         let mangled_name = mangle_name(&format!("{ty}_cpp_value_{field}"));
         w!(self, r#"
-#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{ unsafe {{ &mut (*(d as *mut {ty})).{field} }} }}"#);
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(d: *mut u8) -> *mut ZngurCppOpaqueOwnedObject {{ unsafe {{ &mut (*(d as *mut {ty})).{field} }}.unmark_owned() }}"#);
         mangled_name
     }
 

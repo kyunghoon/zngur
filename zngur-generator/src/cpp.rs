@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
-    fmt::{Display, Write},
-    iter, sync::atomic::{AtomicBool, Ordering},
+    collections::HashMap, fmt::{Display, Write}, iter, sync::atomic::{AtomicBool, Ordering}
 };
 
 use itertools::Itertools;
@@ -10,20 +8,6 @@ use zngur_def::{Mutability, RustTrait, RustType, ZngurMethodReceiver};
 use crate::{rust::IntoCpp, ZngurWellknownTraitData};
 
 static SIG_OUTPUT: AtomicBool = AtomicBool::new(false);
-
-const USE_OPAQUE_OBJECT_REFS: bool = false;
-const USE_ALT_CONV: bool = true;
-
-fn parse_cpp_inner_val_ty(cpp_ty: &str) -> &str {
-    // let str = cpp_ty.trim();
-    // if str.starts_with("val") {
-    //     let str = str[3..].trim();
-    //     if str.starts_with("<") && str.ends_with(">") {
-    //         return &str[1..str.len() - 1];
-    //     }
-    // }
-    cpp_ty
-}
 
 #[derive(Debug)]
 pub struct CppPath(pub Vec<String>);
@@ -646,17 +630,6 @@ namespace rust {{
         friend uint8_t* ::rust::__zngur_internal_data_ptr<::rust::{ref_kind}<{ty}>>(const ::rust::{ref_kind}<{ty}>& t);"#,
                     ty = self.ty,
                 )?;
-            } else if self.cpp_value.is_some() && USE_OPAQUE_OBJECT_REFS {
-                write!(state, r#"
-namespace rust {{
-    template<> struct {ref_kind}<{ty}> {{
-        {ref_kind}() {{ data = 0; is_objref = false; }}
-        {ref_kind}(const {ty}& t) {{ ::rust::__zngur_internal_check_init<{ty}>(t); data = reinterpret_cast<size_t>(__zngur_internal_data_ptr(t)); is_objref = false; }}
-    private:
-        size_t data; bool is_objref;
-        friend uint8_t* ::rust::__zngur_internal_data_ptr<::rust::{ref_kind}<{ty}>>(const ::rust::{ref_kind}<{ty}>& t);"#,
-                    ty = self.ty,
-                )?;
             } else {
                 write!(state, r#"
 namespace rust {{
@@ -671,17 +644,13 @@ namespace rust {{
             }
             write!(state, "\n    public:")?;
             if ref_kind == "Ref" {
-                if self.cpp_value.is_some() && USE_OPAQUE_OBJECT_REFS {
-                    write!(state, r#"
-        Ref(RefMut<{ty}> rm) {{ data = rm.data; is_objref = false; }}"#, ty = self.ty)?;
-                } else {
-                    write!(state, r#"
+                write!(state, r#"
         Ref(RefMut<{ty}> rm) {{ data = rm.data; }}"#, ty = self.ty)?;
-                }
             } else {
                 write!(state, r#"
         friend Ref<{ty}>;"#, ty = self.ty)?;
             }
+
             match &self.from_trait_ref {
                 Some(RustTrait::Fn { inputs, output, .. }) => {
                     let as_std_function = format!(
@@ -699,59 +668,40 @@ namespace rust {{
                 }
                 None => (),
             }
-            if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
-                if USE_OPAQUE_OBJECT_REFS {
-                    let cpp_ty = parse_cpp_inner_val_ty(cpp_ty);
-                    let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+            if let Some((_, cpp_ty)) = &self.cpp_value {
                     if ref_kind == "Ref" {
-            //            write!(state, r#"
-            //inline {cpp_ty}& cpp() {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
-                        write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}> const*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
-                        write!(state, r#"
-            inline {ref_kind}(const ::rust::ZngurCppOpaqueOwnedObjectRef<{cpp_ty}>& t) : data(reinterpret_cast<size_t>(&t)), is_objref(true) {{ }}"#)?;
-                    } else {
-                        write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}> const*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
-                        write!(state, r#"
-            inline {cpp_ty}& cpp() {{ return is_objref ? reinterpret_cast<::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}>*>(data)->as_cpp() : (*{api}{rust_link_name}(reinterpret_cast<uint8_t*>(data))).as_cpp<{cpp_ty}>(); }}"#)?;
-                        write!(state, r#"
-            inline {ref_kind}(::rust::ZngurCppOpaqueOwnedObjectRefMut<{cpp_ty}>& t) : data(reinterpret_cast<size_t>(&t)), is_objref(true) {{ }}"#)?;
-                    }
+                    write!(state, r#"
+        inline {cpp_ty} const& cpp() const {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        // inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+                    write!(state, r#"
+        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
                 } else {
-                    if ref_kind == "Ref" {
-            //            write!(state, r#"
-            //inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
-                        write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
-                        write!(state, r#"
-            inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
-                    } else {
-                        write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
-                        write!(state, r#"
-            inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
-                        write!(state, r#"
-            inline {ref_kind}({cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
-                    }
+                    write!(state, r#"
+        inline {cpp_ty} const& cpp() const {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        // inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+                    write!(state, r#"
+        inline {cpp_ty}& cpp() {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+        // inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+                    write!(state, r#"
+        inline {ref_kind}({cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
                 }
             }
             if let Some(cpp_ty) = &self.cpp_ref {
-                let cpp_ty = parse_cpp_inner_val_ty(cpp_ty);
                 if ref_kind == "Ref" {
-            //        write!(state, r#"
-            //inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
                     write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        inline {cpp_ty} const& cpp() const {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        // inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
                     write!(state, r#"
-            inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
+        inline {ref_kind}(const {cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
                 } else {
                     write!(state, r#"
-            inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        inline {cpp_ty} const& cpp() const {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject const*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
+        // inline {cpp_ty} const& cpp() const {{ return *reinterpret_cast<{cpp_ty} const*>(data); }}"#)?;
                     write!(state, r#"
-            inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+        inline {cpp_ty}& cpp() {{ return reinterpret_cast<ZngurCppOpaqueOwnedObject*>(data)->is_owned() ? reinterpret_cast<ZngurCppOpaqueOwnedObject*>(data)->as_cpp<{cpp_ty}>() : *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
+        // inline {cpp_ty}& cpp() {{ return *reinterpret_cast<{cpp_ty}*>(data); }}"#)?;
                     write!(state, r#"
-            inline {ref_kind}({cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
+        inline {ref_kind}({cpp_ty}& t) : data(reinterpret_cast<size_t>(&t)) {{}}"#)?;
                 }
             }
             for method in &self.methods {
@@ -983,7 +933,6 @@ namespace rust {{
                 }
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
-                let cpp_ty = parse_cpp_inner_val_ty(cpp_ty);
                 let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
                 write!(state, r#"
         inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(&data[0])).as_cpp<{cpp_ty}>(); }}"#)?;
@@ -1076,8 +1025,8 @@ namespace rust {{
         self.emit_ref_specialization(state)?;
 
         if self.ty.is_enum {
-            let to_struct_name = if USE_ALT_CONV { "ToRst" } else { "ToRust" };
-            let to_method_name = if USE_ALT_CONV { "to" } else { "to_rust" };
+            let to_struct_name = "ToRust";
+            let to_method_name = "to";
             write!(state, r#"
 template<> struct {to_struct_name}<{ty}::Type> {{
     typedef {path} type;
@@ -1100,8 +1049,8 @@ template<> struct {to_struct_name}<{ty}::Type> {{
                 }
             }
 
-            let from_struct_name = if USE_ALT_CONV { "FromRst" } else { "FromRust" };
-            let from_method_name = if USE_ALT_CONV { "from" } else { "from_rust" };
+            let from_struct_name = "FromRust";
+            let from_method_name = "from";
 
             write!(state, r#"
     }}
@@ -1151,6 +1100,7 @@ template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::R
         let my_name = cpp_type.strip_prefix("::").unwrap();
         let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
         for c in &self.constructors {
+            let is_owned_obj = c.inputs.iter().next().map(|ty| &ty.path.0 == &["rust", "ZngurCppOpaqueOwnedObject"]).unwrap_or_default();
             let fn_name = my_name.to_owned() + "::" + self.ty.path.0.last().unwrap();
             let CppFnSig {
                 inputs,
@@ -1160,6 +1110,7 @@ template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::R
             write!(state, "\ninline {fn_name}({input_defs}) {{
     ::rust::__zngur_internal_assume_init(*this);
     {api}{rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(*this));
+    {owned}
     {deinits}
 }}",
                 input_defs = inputs
@@ -1170,6 +1121,9 @@ template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::R
                 input_args = (0..inputs.len())
                     .map(|n| format!("::rust::__zngur_internal_data_ptr(i{n}), "))
                     .join(""),
+                owned = if !is_owned_obj { "" } else {
+                    "reinterpret_cast<::rust::ZngurCppOpaqueOwnedObject&>(this->data).mark_owned();"
+                },
                 deinits = (0..inputs.len())
                     .map(|n| format!("::rust::__zngur_internal_assume_deinit(i{n});"))
                     .join("\n"),
@@ -1494,24 +1448,20 @@ impl CppFile {
         } else {
             ""
         };
-        if USE_ALT_CONV {
-            state.text += r#"
-template<typename T> struct _MISSING_TO_RST_TYPE_;
-template<typename T> struct _MISSING_FROM_RST_TYPE_;
-template<typename T> struct ToRst { static_assert(sizeof(_MISSING_TO_RST_TYPE_<T>) == -1, "ToRst"); };
-template<typename T> struct FromRst { static_assert(sizeof(_MISSING_FROM_RST_TYPE_<T>) == -1, "FromRst"); };
-"#;
-        } else {
-            state.text += r#"
-template<typename T, typename Enable = void> struct FromRust {};
-template<typename T, typename Enable = void> struct ToRust {};
-"#;
-        }
         state.text += r#"
-template<typename T> struct __zngur__to_rust { typedef T type; };
-template<typename T> struct __zngur__from_rust { typedef T type; };
+template<typename T> struct _MISSING_TO_RUST_CONVERSION_TYPE_;
+template<typename T> struct _MISSING_FROM_RUST_CONVERSION_TYPE_;
+template<typename T> struct ToRust { static_assert(sizeof(_MISSING_TO_RUST_CONVERSION_TYPE_<T>) == -1, "ToRust"); };
+template<typename T> struct FromRust { static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "FromRust"); };
+"#;
+        state.text += r#"
+#define PTR_TAG_MASK 0x1UL
+#define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
+#define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
+#define PTR_TAG_CLEAR(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
 
-template<typename T> struct Val : public T {};
+template<typename T> struct __zngur__to_rust { static_assert(sizeof(_MISSING_TO_RUST_CONVERSION_TYPE_<T>) == -1, "to_rust"); };
+template<typename T> struct __zngur__from_rust { static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "from_rust"); };
 
 namespace rust {
     template<typename T> uint8_t* __zngur_internal_data_ptr(const T& t);
@@ -1536,30 +1486,15 @@ namespace rust {
         template<typename T, typename... Args> inline static ZngurCppOpaqueOwnedObject build(Args&&... args) {
             ZngurCppOpaqueOwnedObject o;
             o.data = reinterpret_cast<uint8_t*>(new T(::std::forward<Args>(args)...));
-            o.destructor = [](uint8_t* d) { delete reinterpret_cast<T*>(d); };
+            o.destructor = [](uint8_t* d) { delete reinterpret_cast<T*>(PTR_TAG_CLEAR(d)); };
             return o;
         }
-        template<typename T> inline T& as_cpp() { return *reinterpret_cast<T *>(data); }
+        void mark_owned() { data = PTR_TAG_SET(data, true); }
+        bool is_owned() const { return PTR_TAG_GET(data); }
+        template<typename T> inline T& as_cpp() { return *reinterpret_cast<T*>(PTR_TAG_CLEAR(data)); }
+        template<typename T> inline T const& as_cpp() const { return *reinterpret_cast<T const*>(PTR_TAG_CLEAR(data)); }
     };
 "#;
-        if USE_OPAQUE_OBJECT_REFS {
-            state.text += r#"
-    template<typename T> class ZngurCppOpaqueOwnedObjectRef {
-        T const& data;
-    public:
-        ZngurCppOpaqueOwnedObjectRef(T const& t) : data(t) {}
-        inline T const& as_cpp() const { return data; }
-        inline T& as_cpp() { return const_cast<T&>(data); }
-    };
-    template<typename T> class ZngurCppOpaqueOwnedObjectRefMut {
-        T& data;
-    public:
-        ZngurCppOpaqueOwnedObjectRefMut(T& t) : data(t) {}
-        inline T& as_cpp() { return data; }
-        inline T const& as_cpp() const { return data; }
-    };
-"#;
-        }
         state.text += r#"
     template<typename T> struct Ref;
     template<typename T> struct RefMut;
@@ -1625,15 +1560,6 @@ namespace rust {
             if !ok_for_android { write!(state, "\n#endif // !PLATFORM_ANDROID\n")?; }
         }
         writeln!(state, "}}")?;
-
-        writeln!(state, "
-namespace to {{
-    // template<typename T> using cref = ::std::cref<T>;
-    // template<typename T> using ref = ::std::ref<T>;
-    template<typename T> ::rust::ZngurCppOpaqueOwnedObject val(T&& t) {{
-        return ::rust::ZngurCppOpaqueOwnedObject::build<T>(t);
-    }}
-}}")?;
 
         // TODO: this section needs deduping, but c++ doesn't seem to mind
         self.emit_links(&mut EmitMode::Cpp(state, state.hotreload))?;
@@ -1705,6 +1631,64 @@ namespace rust {{
             }
             write!(state, "\n    }};\n}}")?;
         }
+
+        write!(state, r#"
+namespace zngur {{
+    template<typename T> using to_rust_t = typename ::__zngur__to_rust<T>::type;
+    template<typename T> using from_rust_t = typename ::__zngur__from_rust<T>::type;
+}}
+
+// TO
+template<typename T> struct ToRust<T&> {{ static_assert(sizeof(_MISSING_TO_RUST_CONVERSION_TYPE_<T>) == -1, "ToRust (ref or cref needed)");  }};
+template<typename T> struct ToRust<T const&> {{ typedef ::rust::Ref<::zngur::to_rust_t<T>> type; static inline type to(T const& t) {{ return type(t); }} }};
+template<typename T> struct ToRust<T&&> : public ToRust<T> {{}}; // pass by value
+template<typename T> struct ToRust<T const&&> : public ToRust<T> {{}}; // pass by value
+template<typename T> struct ToRust<std::reference_wrapper<T const>> : public ToRust<T const&> {{}};
+template<typename T> struct ToRust<std::reference_wrapper<T const>&&> : public ToRust<T const&> {{}};
+template<typename T> struct ToRust<std::reference_wrapper<T>> {{ typedef ::rust::RefMut<::zngur::to_rust_t<T>> type; static inline type to(T& t) {{ return type(t); }} }};
+template<typename T> struct ToRust<std::reference_wrapper<T>&&> : public ToRust<std::reference_wrapper<T>> {{}};
+// FROM
+template<typename T> struct FromRust<T&> {{ static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "FromRust (ref or cref might be needed)");  }};
+template<typename T> struct FromRust<T const&> {{ static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "FromRust (ref or cref might be needed)");  }};
+template<typename T> struct FromRust<T&&> : public FromRust<T> {{}}; // pass by value
+template<typename T> struct FromRust<T const&&> : public FromRust<T> {{}}; // pass by value
+template<typename T> struct FromRust<::rust::RefMut<T>> {{ typedef ::zngur::from_rust_t<T>& type; static inline type from(::rust::RefMut<T>&& t) {{ return t.cpp(); }} }};
+template<typename T> struct FromRust<::rust::Ref<T>> {{ typedef ::zngur::from_rust_t<T> const& type; static inline type from(::rust::Ref<T> const& t) {{ return t.cpp(); }} }};
+template<typename T> struct FromRust<std::reference_wrapper<::rust::Ref<T> const>> : public FromRust<::rust::Ref<T>> {{}};
+"#)?;
+
+        for td in &self.type_defs {
+            if let Some((_, cpp_ty)) = &td.cpp_value {
+                write!(state, "\ntemplate<> struct ToRust<{cpp_ty}> {{ typedef ::zngur::to_rust_t<{cpp_ty}> type; static inline type to({cpp_ty} const& t) {{ return type(::rust::ZngurCppOpaqueOwnedObject::build<{cpp_ty}>(t)); }} }};")?;
+                write!(state, "\ntemplate<> struct FromRust<{ty}> {{ typedef ::zngur::from_rust_t<{ty}> type; static inline type from({ty} const& t) {{ return t.cpp(); }} }};", ty = td.ty)?;
+            }
+        }
+
+        write!(state, r#"
+template<typename T> inline typename ToRust<T&&>::type _ToRs(T&& t) {{ return ToRust<T&&>::to(std::forward<T>(t)); }}
+template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ return FromRust<T&&>::from(std::forward<T>(t)); }}
+
+#ifndef ToRs_cref
+#  define ToRs_cref(x) _ToRs(std::cref(x))
+#endif
+#ifndef ToRs_ref
+#  define ToRs_ref(x) _ToRs(std::ref(x))
+#endif
+#ifndef ToRs_nomove
+#  define ToRs_nomove(x) _ToRs(x)
+#endif
+#ifndef ToRs
+#  define ToRs(x) _ToRs(std::move(x))
+#endif
+
+#ifndef FromRs_nomove
+#  define FromRs_nomove(x) _FromRs(x)
+#endif
+#ifndef FromRs
+#  define FromRs(x) _FromRs(std::move(x))
+#endif
+"#)?;
+
         Ok(())
     }
 
