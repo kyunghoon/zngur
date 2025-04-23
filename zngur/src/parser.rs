@@ -2,7 +2,7 @@ use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, H
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, token::Shl, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
 use crate::{instantiate::Instantiatable, types::{map_type_paths, TypeEnv, TypeEnvBuilder}, CppWriter};
 use super::{Result, Error, types};
 
@@ -1344,7 +1344,24 @@ impl ParseState {
                         }
                     }
                     None => {
-                        Ok(Some(ImplItem::Verbatim(token_stream)))
+                        let should_bind = self_ident.map(|id| self.structs_that_bind.contains_key(id)).unwrap_or_default();
+                        if should_bind {
+                            let token_stream = remove_semicolon(token_stream)?;
+                            let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
+                            if self.mode == ParseMode::TypeCheck {
+                                Ok(Some(ImplItem::Fn(impl_fn)))
+                            } else {
+                                let ident = &impl_fn.sig.ident;
+                                let inputs = impl_fn.sig.inputs.iter().filter_map(|i| match i {
+                                    FnArg::Receiver(_) => None,
+                                    FnArg::Typed(pat_type) => Some(&pat_type.pat),
+                                }).collect::<Punctuated<_, Token![,]>>();
+                                impl_fn.block = parse_quote!({ self.0.#ident(#inputs) });
+                                Ok(Some(ImplItem::Fn(impl_fn)))
+                            }
+                        } else {
+                            Ok(Some(ImplItem::Verbatim(token_stream)))
+                        }
                     }
                 }
             }
@@ -1664,7 +1681,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                             }
                             ImplItem::Verbatim(token_stream) => {
                                 let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone()).unwrap();
-                                if matches!(transfer_type, Some(TransferType::Export)) {
+                                if matches!(transfer_type, Some(TransferType::Export)) || matches!(transfer_type, None) {
                                     let token_stream = remove_semicolon(token_stream)?;
                                     let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
                                     let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
