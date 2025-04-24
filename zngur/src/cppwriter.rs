@@ -88,6 +88,7 @@ impl CppWriter {
                     i if i == "u32" => "::uint32_t".to_string(),
                     i if i == "u64" => "::uint64_t".to_string(),
                     i if i == "usize" => "::size_t".to_string(),
+                    i if i == "isize" => "std::::ptrdeff_t".to_string(),
                     i if i == "f32" => "float".to_string(),
                     i if i == "f64" => "double".to_string(),
                     i if i == "bool" => "Bool".to_string(),
