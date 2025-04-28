@@ -46,6 +46,7 @@ impl<'a> Instantiate<'a> {
         }
         Ok(item)
     }
+    #[allow(dead_code)]
     pub fn item_enum(&self, item: &ItemEnum) -> Option<ItemEnum> {
         let mut item = item.clone();
         item.generics.params.clear();
@@ -113,7 +114,7 @@ impl Instantiatable for ItemStruct {
     fn ident(&self) -> &Ident { &self.ident }
     fn generics(&self) -> &Generics { &self.generics }
     fn instantiate_type(&self, _inst: &Instantiate) -> Option<Self> {
-        let mut item = self.clone();
+        let item = self.clone();
         // item.generics.params.clear();
         Some(item)
     }

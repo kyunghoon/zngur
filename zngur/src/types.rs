@@ -67,7 +67,7 @@ mod env {
                 None
             }
         }
-        pub fn to_fully_qualified(&self, type_path: &TypePath, to_full: Option<&Path>, dbg: bool) -> TypePath {
+        pub fn to_fully_qualified(&self, type_path: &TypePath, to_full: Option<&Path>) -> TypePath {
             let p = &type_path.path;
             if let Some(to) = p.leading_colon.is_none().then_some(to_full).flatten() {
                 if let Some(resolved_to) = self.resolve_typepath(to, &type_path) {
@@ -81,7 +81,7 @@ mod env {
                 parse_quote!(#p)
             }
         }
-        pub fn from_fully_qualfied(&self, type_path: &TypePath, from_full: Option<&Path>, dbg: bool) -> TypePath {
+        pub fn from_fully_qualfied(&self, type_path: &TypePath, from_full: Option<&Path>) -> TypePath {
             let mut type_path = type_path.clone();
             let from_full = if let (Some((path, tp_trunc)), Some(from)) = (TypeEnv::split_typepath(&type_path), from_full.as_ref()) {
                 let pc = self.resolve_prelude(&tp_trunc);
@@ -113,8 +113,8 @@ mod env {
 }
 
 use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
-use quote::ToTokens;
-use syn::{parse_quote, punctuated::Punctuated, token::PathSep, GenericArgument, Ident, ItemEnum, ItemMod, ItemStruct, ItemUse, Path, PathArguments, PathSegment, ReturnType, Token, Type, TypeArray, TypeBareFn, TypeGroup, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple };
+// use quote::ToTokens;
+use syn::{parse_quote, punctuated::Punctuated, GenericArgument, Ident, ItemEnum, ItemMod, ItemStruct, ItemUse, Path, PathArguments, ReturnType, Token, Type, TypeArray, TypeBareFn, TypeGroup, TypeParen, TypePath, TypePtr, TypeReference, TypeSlice, TypeTuple };
 pub use env::TypeEnv;
 
 pub struct TypeEnvBuilder {
@@ -152,9 +152,9 @@ impl TypeEnvBuilder {
             self.insert(item_struct.ident.clone(), None);
         }
     }
-    pub fn do_use(&mut self, item_use: &ItemUse) {
+    pub fn do_use(&mut self, _item_use: &ItemUse) {
         if !self.modstack.is_empty() {
-            println!("cargo:warning=USE {} ({})", item_use.tree.to_token_stream(), self.path().to_token_stream());
+            // println!("cargo:warning=USE {} ({})", item_use.tree.to_token_stream(), self.path().to_token_stream());
         }
     }
     pub fn do_enum(&mut self, item_enum: &ItemEnum) {
@@ -305,14 +305,14 @@ pub fn to_type(ident: &Ident, type_args: Option<&HashMap<Ident, Type>>) -> Type 
     }
 }
 
-pub fn to_fully_qualified(ty: Type, to_full: Option<&Path>, ty_env: Option<&TypeEnv>, dbg: bool, lts: Option<&HashSet<Ident>>) -> Type {
+pub fn to_fully_qualified(ty: Type, to_full: Option<&Path>, ty_env: Option<&TypeEnv>, lts: Option<&HashSet<Ident>>) -> Type {
     map_type_paths_and_lifetimes(ty, &mut |type_path| {
-        ty_env.map(|env| env.to_fully_qualified(&type_path, to_full, dbg)).unwrap_or(type_path)
+        ty_env.map(|env| env.to_fully_qualified(&type_path, to_full)).unwrap_or(type_path)
     }, lts)
 }
 
-pub fn from_fully_qualified(ty: Type, from_full: Option<&Path>, ty_env: Option<&TypeEnv>, dbg: bool, lts: Option<&HashSet<Ident>>) -> Type {
+pub fn from_fully_qualified(ty: Type, from_full: Option<&Path>, ty_env: Option<&TypeEnv>, lts: Option<&HashSet<Ident>>) -> Type {
     map_type_paths_and_lifetimes(ty, &mut |tp| {
-        ty_env.map(|env| env.from_fully_qualfied(&tp, from_full, dbg)).unwrap_or(tp)
+        ty_env.map(|env| env.from_fully_qualfied(&tp, from_full)).unwrap_or(tp)
     }, lts)
 }

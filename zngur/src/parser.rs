@@ -2,7 +2,7 @@ use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, H
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, token::Shl, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
 use crate::{instantiate::Instantiatable, types::{map_type_paths, TypeEnv, TypeEnvBuilder}, CppWriter};
 use super::{Result, Error, types};
 
@@ -455,7 +455,7 @@ impl ParseState {
                 };
 
                 let args = Rc::new(args.args.iter().filter_map(|a| match a {
-                    GenericArgument::Type(ty) => Some(self.eval_type_path(ty.clone(), false, None)),
+                    GenericArgument::Type(ty) => Some(self.eval_type_path(ty.clone(), None)),
                     _ => None,
                 }).collect::<Vec<_>>());
                 let s = Specialization {
@@ -1013,13 +1013,13 @@ impl ParseState {
         Ok((attrs, zng_attrs))
     }
 
-    fn eval_type_path(&self, ty: Type, dbg: bool, lts: Option<&HashSet<Ident>>) -> Type {
+    fn eval_type_path(&self, ty: Type, lts: Option<&HashSet<Ident>>) -> Type {
         let real_modpath = self.cratepath(true);
         let type_env = self.type_env.as_ref();
         types::from_fully_qualified(
-            types::to_fully_qualified(ty, real_modpath.as_ref(), type_env, dbg, lts),
+            types::to_fully_qualified(ty, real_modpath.as_ref(), type_env, lts),
             real_modpath.as_ref(),
-            type_env, dbg, lts
+            type_env, lts
         )
     }
 
@@ -1030,7 +1030,7 @@ impl ParseState {
             let span = item.fields.span();
             let (1, Some(syn::Field { ident: None, ty , .. })) = (item.fields.len(), item.fields.iter().next()) else { return Err(Error::new(span, "expects a single field".into())); };
 
-            let ty = self.eval_type_path(ty.clone(), false, None);
+            let ty = self.eval_type_path(ty.clone(), None);
 
             zng_writer.wl(format!("type {} {{", ty.to_token_stream()).into());
             zng_writer.indent_level += 1;
@@ -1376,7 +1376,7 @@ impl ParseState {
             FnArg::Receiver(receiver) => receiver.to_token_stream(),
             FnArg::Typed(pat_type) => {
                 let ty = self.parse_ty(zng_writer, *pat_type.ty.clone())?;
-                self.eval_type_path(ty, false, lts).to_token_stream()
+                self.eval_type_path(ty, lts).to_token_stream()
             },
         })).collect::<Result<Punctuated<_, Token![,]>>>()?;
         zng_writer.w(format!("fn {}({})", sig.ident, inputs.to_token_stream()).into());
@@ -1386,7 +1386,7 @@ impl ParseState {
                 (Type::Path(TypePath { path, .. }), Some(ident)) if path.is_ident("Self") =>
                     format!(" -> {}", ident.to_token_stream()).into(),
                 (ty, _) => {
-                    let ty = self.eval_type_path(ty, true, lts);
+                    let ty = self.eval_type_path(ty, lts);
                     format!(" -> {}", ty.to_token_stream()).into()
                 }
             });
@@ -1503,7 +1503,7 @@ impl Parser {
                     }
                     Inst::Struct(item_struct, item_impl, zng_attrs, lts) => {
                         let instantiated_items = get_instantiated_items(&item_struct, item_impl.as_ref(), &specializations, &mut self.state.impls)?;
-                        for (item, item_impl, modpath, real_modpath, type_args) in instantiated_items {
+                        for (item, item_impl, _modpath, real_modpath, type_args) in instantiated_items {
                             write_struct(&item, Some(&type_args), self.state.cratepath(true).as_ref(), (*real_modpath).as_ref(), item_impl, &zng_attrs, &mut self.state, &mut self.zng_writer, lts.as_ref())?;
                         }
                     }
@@ -1560,8 +1560,8 @@ fn write_enum(item: &ItemEnum, type_args: Option<&HashMap<Ident, Type>>, from_fu
     let tp: Type = types::from_fully_qualified(
         types::to_fully_qualified(
             types::to_type(&item.ident, type_args),
-            to_full, state.type_env.as_ref(), false, lts),
-        from_full, state.type_env.as_ref(), false, lts);
+            to_full, state.type_env.as_ref(), lts),
+        from_full, state.type_env.as_ref(), lts);
     zng_writer.wl(format!("type {} {{", tp.to_token_stream()).into());
     zng_writer.indent_level += 1;
     if let Some(args) = type_args {
@@ -1592,8 +1592,8 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
     let tp: Type = types::from_fully_qualified(
         types::to_fully_qualified(
             types::to_type(&item.ident, type_args),
-            to_full, state.type_env.as_ref(), false, lts),
-        from_full, state.type_env.as_ref(), false, lts);
+            to_full, state.type_env.as_ref(), lts),
+        from_full, state.type_env.as_ref(), lts);
     zng_writer.wl(format!("type {} {{", tp.to_token_stream()).into());
     zng_writer.indent_level += 1;
 

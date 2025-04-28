@@ -196,7 +196,7 @@ r#"#[allow(dead_code)] mod zngur_types {
         pub fn inner<T>(&self) -> Option<&T> { if !self.is_owned() { None } else { Some(unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }) } }
         pub fn unmark_owned(&mut self) -> &mut Self { if self.is_owned() { self.data = unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }; } self }
     }
-    impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { (self.destructor)(self.data) } }
+    impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { if !self.data.is_null() { (self.destructor)(self.data) } } }
 }
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueOwnedObject;
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueBorrowedObject;"#
