@@ -1,21 +1,21 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::BTreeMap, fmt::Display};
 
 use itertools::Itertools;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mutability {
     Mut,
     Not,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ZngurMethodReceiver {
     Static,
     Ref(Mutability, Option<String>),
     Move,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZngurMethod {
     pub name: String,
     pub generics: Vec<RustType>,
@@ -24,21 +24,22 @@ pub struct ZngurMethod {
     pub output: RustType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZngurFn {
+    pub has_receiver: bool,
     pub path: RustPathAndGenerics,
     pub inputs: Vec<RustType>,
     pub output: RustType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZngurExternCppFn {
     pub name: String,
     pub inputs: Vec<RustType>,
     pub output: RustType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ZngurExternCppImpl {
     pub tr: Option<RustTrait>,
     pub ty: RustType,
@@ -105,7 +106,7 @@ pub struct ZngurTrait {
 #[derive(Default)]
 pub struct ZngurFile {
     pub types: Vec<ZngurType>,
-    pub traits: HashMap<RustTrait, ZngurTrait>,
+    pub traits: BTreeMap<RustTrait, ZngurTrait>,
     pub funcs: Vec<ZngurFn>,
     pub extern_cpp_funcs: Vec<ZngurExternCppFn>,
     pub extern_cpp_impls: Vec<ZngurExternCppImpl>,
@@ -113,7 +114,7 @@ pub struct ZngurFile {
     pub convert_panic_to_exception: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RustTrait {
     Normal(RustPathAndGenerics),
     Fn {
@@ -133,7 +134,7 @@ impl RustTrait {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PrimitiveRustType {
     Uint(u32),
     Int(u32),
@@ -144,7 +145,7 @@ pub enum PrimitiveRustType {
     ZngurCppOpaqueOwnedObject,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RustType {
     Primitive(PrimitiveRustType),
     Ref(Mutability, Box<RustType>, Option<String>),
@@ -157,7 +158,7 @@ pub enum RustType {
     Enum(RustEnum),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RustEnum {
     pub path: Vec<String>,
 }
@@ -174,16 +175,12 @@ impl Display for RustEnum {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RustPathAndGenerics {
     pub path: Vec<String>,
     pub generics: Vec<RustType>,
     pub named_generics: Vec<(String, RustType)>,
     pub lifetimes: Vec<String>,
-}
-
-impl RustType {
-    pub const UNIT: Self = RustType::Tuple(Vec::new());
 }
 
 impl Display for RustPathAndGenerics {
@@ -224,7 +221,7 @@ impl Display for RustTrait {
             } => {
                 write!(f, "{name}({})", inputs.iter().join(", "))?;
                 if **output != RustType::UNIT {
-                    write!(f, " -> {output}")?;
+                    write!(f, " -> {}", OutputRustTypeWrapper::new(&output))?;
                 }
                 Ok(())
             }
@@ -267,3 +264,89 @@ impl Display for RustType {
         }
     }
 }
+
+pub struct OutputRustTypeWrapper<'a> { ty: &'a RustType }
+impl<'a> OutputRustTypeWrapper<'a> { pub fn new(ty: &'a RustType) -> Self { Self { ty } } }
+impl<'a> Display for OutputRustTypeWrapper<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // if self.ty.has_ref_mut() {
+        self.ty.to_mut_guard_type().fmt(f)
+        // } else {
+        //     self.ty.fmt(f)
+        // }
+    }
+}
+
+impl RustType {
+    pub const UNIT: Self = RustType::Tuple(Vec::new());
+    pub fn has_ref_mut(&self) -> bool {
+        match self {
+            RustType::Ref(Mutability::Mut, rust_type, _) if matches!(**rust_type, RustType::Adt(..)) => true,
+            RustType::Adt(RustPathAndGenerics { generics, named_generics, .. }) =>
+                generics.iter().chain(named_generics.iter().map(|(_, ty)| ty)).any(|ty| ty.has_ref_mut()),
+            _ => false,
+        }
+    }
+    pub fn to_mut_guard_type(&self) -> RustType {
+        match self {
+            RustType::Ref(Mutability::Mut, rust_type, v) => {
+                match &**rust_type {
+                    RustType::Adt(RustPathAndGenerics { path, generics, named_generics, lifetimes }) => {
+                        RustType::Adt(RustPathAndGenerics {
+                            path: ["crate", "generated", "GuardedMut"].iter().map(|s| s.to_string()).collect(),
+                            generics: vec![RustType::Adt(RustPathAndGenerics {
+                                path: path.clone(),
+                                generics: generics.iter().map(|ty| ty.to_mut_guard_type()).collect(),
+                                named_generics: named_generics.iter().map(|(k, ty)| (k.clone(), ty.to_mut_guard_type())).collect(),
+                                lifetimes: lifetimes.clone(),
+                            })],
+                            named_generics: vec![],
+                            lifetimes: vec![],
+                        })
+                    },
+                    ty => RustType::Ref(Mutability::Mut, Box::new(ty.clone()), v.clone()),
+                }
+            }
+            RustType::Adt(RustPathAndGenerics { path, generics, named_generics, lifetimes }) => {
+                RustType::Adt(RustPathAndGenerics {
+                    path: path.clone(),
+                    generics: generics.iter().map(|ty| ty.to_mut_guard_type()).collect(),
+                    named_generics: named_generics.iter().map(|(k, v)| (k.clone(), v.to_mut_guard_type())).collect(),
+                    lifetimes: lifetimes.clone(),
+                })
+            }
+            ty => ty.clone(),
+        }
+    }
+}
+
+pub struct OutputRustConstructorWrapper<'a> { ty: &'a RustType, varname: &'a str, ind: &'a str }
+impl<'a> OutputRustConstructorWrapper<'a> { pub fn new(ty: &'a RustType, varname: &'a str, indent: &'a str) -> Self { Self { ty, varname, ind: indent } } }
+impl<'a> Display for OutputRustConstructorWrapper<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // f.write_str(&format!("let ret: {} = {}.assume_init();", self.ty, self.varname))?;
+
+        // fn mapper_str(varname: &str, ty: &RustType) -> String {
+        //     match ty {
+        //         RustType::Ref(Mutability::Mut, _, _) => {
+        //             format!("GuardedMut::new({varname})")
+        //         }
+        //         RustType::Adt(RustPathAndGenerics { path, generics, .. }) if path == &["std", "option", "Option"] && generics.len() == 1 => {
+        //             let first = generics.first().unwrap();
+        //             match first {
+        //                 RustType::Ref(Mutability::Mut, _, _) => {
+        //                     format!("{varname}.map(GuardedMut::new)")
+        //                 }
+        //                 first => 
+        //                     format!("{varname}.map(|v| {})", mapper_str("v", first))
+        //             }
+        //         }
+        //         _ => varname.to_string(),
+        //     }
+        // }
+
+        // f.write_str(&format!("\n{}{}", self.ind, mapper_str("ret", self.ty)))
+        f.write_str(&format!("GuardFrom::with_uninit({})", self.varname))
+    }
+}
+

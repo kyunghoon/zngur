@@ -370,6 +370,7 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
             ParsedItem::Fn(f) => {
                 let method = f.to_zngur(base);
                 r.funcs.push(ZngurFn {
+                    has_receiver: method.receiver != ZngurMethodReceiver::Static,
                     path: RustPathAndGenerics {
                         path: base.iter().chain(Some(&method.name)).cloned().collect(),
                         generics: method.generics,

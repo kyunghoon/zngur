@@ -10,6 +10,7 @@ license.workspace = true
 
 [features]
 hotreload = ["zngur-generator/hotreload"]
+mut-guard = ["zngur-generator/mut-guard"]
 std-namespace-fix = ["zngur-generator/std-namespace-fix"]
 edition-2024 = ["zngur-generator/edition-2024"]
 

@@ -1079,7 +1079,7 @@ impl ParseState {
         self.declare_type_identifier(&ident);
         if let Some(trait_ident) = bind_id {
             Ok(Some(parse_quote! {
-                #vis struct #ident<'a>(Box<dyn #trait_ident<'a> + 'a>);
+                #vis struct #ident(Box<dyn #trait_ident>);
             }))
         } else {
             match (fields, passing_style, is_meta_type) {
@@ -1251,6 +1251,7 @@ impl ParseState {
                     let prev_disabled = if !is_extern_cpp { None } else { Some(zng_writer.disabled) };
                     if prev_disabled.is_some() { zng_writer.disabled = true; }
                     sig = self.parse_sig(zng_writer, self_ident, sig, lts)?;
+                    sig = if self.mode == ParseMode::Generate { to_guarded_signature(sig) } else { sig };
                     prev_disabled.map(|d| zng_writer.disabled = d);
 
                     let block: Block = if let Some(path) = (self.mode == ParseMode::Generate).then(|| self_ident.and_then(|i| self.structs_that_bind.get(i))).flatten() {
@@ -1293,11 +1294,21 @@ impl ParseState {
                     Ok(Some(syn::ImplItem::Fn(ImplItemFn { attrs, vis, defaultness, sig, block })))
                 } else {
                     let should_bind = self_ident.map(|id| self.structs_that_bind.contains_key(id)).unwrap_or_default();
-                    if self.mode == ParseMode::Generate && should_bind {
-                        panic!("{:?}", sig.ident);
+                    if self.mode == ParseMode::Generate {
+                        if should_bind {
+                            panic!("{:?}", sig.ident);
+                        } else {
+                            let mut impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
+                            impl_item_fn.sig.output = match impl_item_fn.sig.output {
+                                ReturnType::Default => ReturnType::Default,
+                                ReturnType::Type(rarrow, ty) => ReturnType::Type(rarrow, Box::new(to_guarded_type(*ty))),
+                            };
+                            Ok(Some(ImplItem::Fn(impl_item_fn)))
+                        }
+                    } else {
+                        let impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
+                        Ok(Some(ImplItem::Fn(impl_item_fn)))
                     }
-                    let impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
-                    Ok(Some(ImplItem::Fn(impl_item_fn)))
                 }
             }
             ImplItem::Type(impl_item_type) => {
@@ -1392,6 +1403,7 @@ impl ParseState {
             });
         }
         zng_writer.wl(";".into());
+
         Ok(sig)
     }
 }
@@ -1706,7 +1718,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                                     if !is_static {
                                         trait_fns.push(TraitItemFn {
                                             attrs: impl_fn.attrs,
-                                            sig: impl_fn.sig.clone(),
+                                            sig: to_guarded_signature(impl_fn.sig.clone()),
                                             default: None,
                                             semi_token: None,
                                         });
@@ -1717,7 +1729,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                             _ => Ok(())
                         }).collect::<Result<()>>()?;
                         let trait_id = Ident::new(&(item.ident.to_string() + "Trait"), Span::call_site());
-                        let trait_: ItemTrait = parse_quote!{ pub trait #trait_id<'a> { #(#trait_fns)* } };
+                        let trait_: ItemTrait = parse_quote!{ pub trait #trait_id { #(#trait_fns)* } };
                         state.bind_traits.push(trait_);
                         bind_id = Some(trait_id);
                     }
@@ -1732,4 +1744,76 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
     zng_writer.indent_level -= 1;
     zng_writer.wl("}".into());
     Ok((bind_id, passing_style))
+}
+
+fn to_guarded_type(ty: Type) -> Type {
+    match ty {
+        Type::Reference(ty_ref) if ty_ref.mutability.is_some() => {
+            let is_atomic = match &*ty_ref.elem {
+                Type::Path(TypePath { qself: None, path })
+                    if path.is_ident("u32") || path.is_ident("i32") => true,
+                _ => false,
+            };
+
+            if is_atomic {
+                Type::Reference(ty_ref)
+            } else {
+                let ty = ty_ref.elem;
+                parse_quote!(GuardedMut<#ty>)
+            }
+        }
+        Type::Path(TypePath { qself, mut path }) => {
+            path.segments = path.segments.into_iter().map(|PathSegment { ident, arguments }| {
+                PathSegment {
+                    ident,
+                    arguments: match arguments {
+                        PathArguments::None => PathArguments::None,
+                        PathArguments::AngleBracketed(mut args) => {
+                            args.args = args.args.into_iter().map(|arg| {
+                                match arg {
+                                    GenericArgument::Type(ty) =>
+                                        GenericArgument::Type(to_guarded_type(ty)),
+                                    arg => arg
+                                }
+                            }).collect();
+                            PathArguments::AngleBracketed(args)
+                        }
+                        PathArguments::Parenthesized(mut args) => {
+                            args.inputs = args.inputs.into_iter().map(to_guarded_type).collect();
+                            args.output = match args.output {
+                                ReturnType::Type(rarrow, ty) =>
+                                    ReturnType::Type(rarrow, Box::new(to_guarded_type(*ty))),
+                                x => x,
+                            };
+                            PathArguments::Parenthesized(args)
+                        }
+                    }
+                }
+            }).collect();
+            Type::Path(TypePath { qself, path })
+        }
+        ty => ty,
+    }
+}
+
+#[cfg(not(feature = "mut-guard"))]
+fn to_guarded_signature(sig: Signature) -> Signature { sig }
+
+#[cfg(feature = "mut-guard")]
+fn to_guarded_signature(mut sig: Signature) -> Signature {
+    sig.inputs = sig.inputs.into_iter().scan(false, |has_receiver, i| {
+        match i {
+            x @ FnArg::Receiver(_) => {
+                *has_receiver = true;
+                Some(x)
+            },
+            FnArg::Typed(mut pat_type) => {
+                if *has_receiver {
+                    pat_type.ty = Box::new(to_guarded_type(*pat_type.ty));
+                }
+                Some(FnArg::Typed(pat_type))
+            }
+        }
+    }).collect();
+    sig
 }

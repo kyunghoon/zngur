@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, fmt::{Display, Write}, iter, sync::atomic::{AtomicBool, Ordering}
+    collections::BTreeMap, fmt::{Display, Write}, iter, sync::atomic::{AtomicBool, Ordering}
 };
 
 use itertools::Itertools;
@@ -1091,7 +1091,7 @@ template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::R
     fn emit_cpp_fn_defs(
         &self,
         state: &mut State,
-        traits: &HashMap<RustTrait, CppTraitDefinition>,
+        traits: &BTreeMap<RustTrait, CppTraitDefinition>,
     ) -> std::fmt::Result {
         let is_unsized = self
             .wellknown_traits
@@ -1396,7 +1396,7 @@ namespace rust {{
 #[derive(Default)]
 pub struct CppFile {
     pub type_defs: Vec<CppTypeDefinition>,
-    pub trait_defs: HashMap<RustTrait, CppTraitDefinition>,
+    pub trait_defs: BTreeMap<RustTrait, CppTraitDefinition>,
     pub fn_defs: Vec<CppFnDefinition>,
     pub exported_fn_defs: Vec<CppExportedFnDefinition>,
     pub exported_impls: Vec<CppExportedImplDefinition>,

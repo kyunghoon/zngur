@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry;
+use std::collections::btree_map::Entry;
 use std::collections::HashSet;
 
 use cpp::cpp_handle_keyword;
@@ -135,6 +135,7 @@ impl ZngurGenerator {
                 } = method_details;
                 let (rusty_inputs, inputs) = real_inputs_of_method(&method, &ty_def.ty);
                 let rust_link_name = rust_file.add_function(
+                    method.receiver != ZngurMethodReceiver::Static,
                     &format!(
                         "<{}>::{}::<{}>",
                         deref.as_ref().unwrap_or(&ty_def.ty),
@@ -205,6 +206,7 @@ impl ZngurGenerator {
         }
         for func in zng.funcs {
             let rust_link_name = rust_file.add_function(
+                func.has_receiver,
                 &func.path.to_string(),
                 &func.inputs,
                 &func.output,
