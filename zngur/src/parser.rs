@@ -1293,11 +1293,21 @@ impl ParseState {
                     Ok(Some(syn::ImplItem::Fn(ImplItemFn { attrs, vis, defaultness, sig, block })))
                 } else {
                     let should_bind = self_ident.map(|id| self.structs_that_bind.contains_key(id)).unwrap_or_default();
-                    if self.mode == ParseMode::Generate && should_bind {
-                        panic!("{:?}", sig.ident);
+                    if self.mode == ParseMode::Generate {
+                        if should_bind {
+                            panic!("{:?}", sig.ident);
+                        } else {
+                            let mut impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
+                            impl_item_fn.sig.output = match impl_item_fn.sig.output {
+                                ReturnType::Default => ReturnType::Default,
+                                ReturnType::Type(rarrow, ty) => ReturnType::Type(rarrow, Box::new(to_mut_guard_type(*ty))),
+                            };
+                            Ok(Some(ImplItem::Fn(impl_item_fn)))
+                        }
+                    } else {
+                        let impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
+                        Ok(Some(ImplItem::Fn(impl_item_fn)))
                     }
-                    let impl_item_fn = ImplItemFn { attrs, vis, defaultness, sig, block };
-                    Ok(Some(ImplItem::Fn(impl_item_fn)))
                 }
             }
             ImplItem::Type(impl_item_type) => {
@@ -1732,4 +1742,44 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
     zng_writer.indent_level -= 1;
     zng_writer.wl("}".into());
     Ok((bind_id, passing_style))
+}
+
+fn to_mut_guard_type(ty: Type) -> Type {
+    match ty {
+        Type::Reference(ty_ref) if ty_ref.mutability.is_some() => {
+            let ty = ty_ref.elem;
+            parse_quote!(GuardedMut<#ty>)
+        }
+        Type::Path(TypePath { qself, mut path }) => {
+            path.segments = path.segments.into_iter().map(|PathSegment { ident, arguments }| {
+                PathSegment {
+                    ident,
+                    arguments: match arguments {
+                        PathArguments::None => PathArguments::None,
+                        PathArguments::AngleBracketed(mut args) => {
+                            args.args = args.args.into_iter().map(|arg| {
+                                match arg {
+                                    GenericArgument::Type(ty) =>
+                                        GenericArgument::Type(to_mut_guard_type(ty)),
+                                    arg => arg
+                                }
+                            }).collect();
+                            PathArguments::AngleBracketed(args)
+                        }
+                        PathArguments::Parenthesized(mut args) => {
+                            args.inputs = args.inputs.into_iter().map(to_mut_guard_type).collect();
+                            args.output = match args.output {
+                                ReturnType::Type(rarrow, ty) =>
+                                    ReturnType::Type(rarrow, Box::new(to_mut_guard_type(*ty))),
+                                x => x,
+                            };
+                            PathArguments::Parenthesized(args)
+                        }
+                    }
+                }
+            }).collect();
+            Type::Path(TypePath { qself, path })
+        }
+        ty => ty,
+    }
 }

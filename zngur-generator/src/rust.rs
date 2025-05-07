@@ -183,7 +183,64 @@ impl Default for RustFile {
             ind: 0,
             hotreload,
             text:
-r#"#[allow(dead_code)] mod zngur_types {
+r#"mod internal {
+    use std::ops::{Deref, DerefMut};
+
+    /// Wraps a mutable reference and discourages direct assignment via `*val = ...`.
+    ///
+    /// This pattern encourages users to call methods for modification instead of
+    /// reassigning the entire value. It still allows `Deref` and `DerefMut`, but these
+    /// are hidden behind another abstraction to make direct mutation less convenient.
+    pub struct NoDirectAssign<'a, T>(&'a mut T);
+
+    impl<'a, T> Deref for NoDirectAssign<'a, T> {
+        type Target = T;
+        fn deref(&self) -> &Self::Target { self.0 }
+    }
+
+    impl<'a, T> DerefMut for NoDirectAssign<'a, T> {
+        fn deref_mut(&mut self) -> &mut Self::Target { self.0 }
+    }
+
+    /// A mutable wrapper that exposes its contents through a [`NoDirectAssign`] guard.
+    ///
+    /// The purpose is to encourage controlled mutation patterns by forcing access
+    /// to go through [`NoDirectAssign`] instead of providing a raw `&mut T`.
+    pub struct GuardedMut<'a, T>(NoDirectAssign<'a, T>);
+
+    impl<'a, T> GuardedMut<'a, T> {
+        /// Wrap a mutable reference in a [`GuardedMut`] wrapper.
+        pub fn new(inner: &'a mut T) -> Self { Self(NoDirectAssign(inner)) }
+
+        /// Access the wrapped value through a [`NoDirectAssign`] reference.
+        pub fn guard(&'a mut self) -> &'a mut NoDirectAssign<'a, T> { &mut self.0 }
+    }
+
+    impl<'a, T> Deref for GuardedMut<'a, T> {
+        type Target = NoDirectAssign<'a, T>;
+
+        fn deref(&self) -> &Self::Target { &self.0 }
+    }
+}
+
+pub use internal::GuardedMut;
+
+/// A trait to convert into a [`GuardedMut`] reference if available.
+///
+/// This is primarily intended for use with container types (like `Option`)
+/// holding a `MutAccessGuard`.
+pub trait AsGuardedMut<'a, T> {
+    /// Returns a mutable reference to the [`GuardedMut`] wrapper if present.
+    fn as_guarded(&'a mut self) -> Option<&'a mut internal::NoDirectAssign<'a, T>>;
+}
+
+impl<'a, T> AsGuardedMut<'a, T> for Option<GuardedMut<'a, T>> {
+    fn as_guarded(&'a mut self) -> Option<&'a mut internal::NoDirectAssign<'a, T>> {
+        self.as_mut().map(|g| g.guard())
+    }
+}
+
+#[allow(dead_code)] mod zngur_types {
     pub struct ZngurCppOpaqueBorrowedObject(());
     #[repr(C)] pub struct ZngurCppOpaqueOwnedObject {
         data: *mut u8,
@@ -260,7 +317,7 @@ pub struct ConstructorMangledNames {
 }
 
 impl RustFile {
-    fn call_cpp_function(&mut self, name: &str, first_input: Option<&str>, inputs: usize) {
+    fn call_cpp_function(&mut self, name: &str, first_input: Option<&str>, inputs: usize, output: &RustType) {
         let ind = self.indentation();
         for n in 0..inputs {
             w!(self, "\n{ind}let mut i{n} = ::core::mem::MaybeUninit::new(i{n});")
@@ -283,7 +340,11 @@ impl RustFile {
             w!(self, "i{n}.as_mut_ptr() as *mut u8, ");
         }
         w!(self, "r.as_mut_ptr() as *mut u8);");
-        w!(self, "\n{ind}r.assume_init()");
+        if output.has_ref_mut() {
+            w!(self, "\n{ind}{}", OutputRustConstructorWrapper::new(&output, "r", &ind))
+        } else {
+            w!(self, "\n{ind}r.assume_init()")
+        }
     }
 
     pub fn add_static_is_copy_assert(&mut self, ty: &RustType) {
@@ -375,13 +436,13 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
             for (i, ty) in method.inputs.iter().enumerate() {
                 w!(self, ", i{i}: {ty}");
             }
-            w!(self, ") -> {} {{ unsafe {{", method.output);
+            w!(self, ") -> {} {{ unsafe {{", OutputRustTypeWrapper::new(&method.output));
             self.indent_inc();
             self.indent_inc();
             self.indent_inc();
             let ind = self.indentation();
             w!(self, "\n{ind}let data = self.value.ptr();");
-            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len());
+            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len(), &method.output);
             self.indent_dec();
             let ind = self.indentation();
             w!(self, "\n{ind}}} }}");
@@ -429,12 +490,12 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
             for (i, ty) in method.inputs.iter().enumerate() {
                 w!(self, ", i{i}: {ty}");
             }
-            w!(self, ") -> {} {{ unsafe {{", method.output);
+            w!(self, ") -> {} {{ unsafe {{", OutputRustTypeWrapper::new(&method.output));
             self.indent_inc();
             self.indent_inc();
             let ind = self.indentation();
             w!(self, "\n{ind}let data = ::std::mem::transmute::<_, *mut u8>(self);");
-            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len());
+            self.call_cpp_function(&rust_link_name, Some("data"), method.inputs.len(), &method.output);
             self.indent_dec();
             let ind = self.indentation();
             w!(self, "\n{ind}}} }}");
@@ -458,7 +519,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         output: &RustType,
     ) -> String {
         let mangled_name = mangle_name(&inputs.iter().chain(Some(output)).join(", "));
-        let trait_str = format!("{name}({}) -> {output}", inputs.iter().join(", "));
+        let trait_str = format!("{name}({}) -> {}", inputs.iter().join(", "), OutputRustTypeWrapper::new(&output));
         w!(self, r#"
 #[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
     let this = unsafe {{ ZngurCppOpaqueOwnedObject::new(data, destructor) }};
@@ -478,7 +539,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         );
         self.indent_inc();
         self.indent_inc();
-        self.call_cpp_function("call", Some("data"), inputs.len());
+        self.call_cpp_function("call", Some("data"), inputs.len(), output);
         self.indent_dec();
         self.indent_dec();
         w!(self, r#"
@@ -613,7 +674,7 @@ impl {owner}{owner_lts} {{"#,
             for (ty, n) in method.inputs.iter().zip(input_offset..) {
                 w!(self, "i{n}: {ty}, ");
             }
-            w!(self, ") -> {} {{ unsafe {{", method.output);
+            w!(self, ") -> {} {{ unsafe {{", OutputRustTypeWrapper::new(&method.output));
             self.indent_inc();
             self.indent_inc();
             if method.receiver != ZngurMethodReceiver::Static {
@@ -624,7 +685,7 @@ impl {owner}{owner_lts} {{"#,
                     w!(self, "\n        let i0 = self;");
                 }
             }
-            self.call_cpp_function(mn, None, method.inputs.len() + input_offset);
+            self.call_cpp_function(mn, None, method.inputs.len() + input_offset, &method.output);
             self.indent_dec();
             self.indent_dec();
             w!(self, "\n    }} }} ");
@@ -653,9 +714,9 @@ pub(crate) fn {rust_name}("#
         for (n, ty) in inputs.iter().enumerate() {
             w!(self, "i{n}: {ty}, ");
         }
-        w!(self, ") -> {output} {{ unsafe {{");
+        w!(self, ") -> {} {{ unsafe {{", OutputRustTypeWrapper::new(&output));
         self.indent_inc();
-        self.call_cpp_function(&mangled_name, None, inputs.len());
+        self.call_cpp_function(&mangled_name, None, inputs.len(), output);
         self.indent_dec();
         w!(self, "\n}} }}");
         mangled_name

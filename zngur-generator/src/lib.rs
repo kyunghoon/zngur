@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry;
+use std::collections::btree_map::Entry;
 use std::collections::HashSet;
 
 use cpp::cpp_handle_keyword;
