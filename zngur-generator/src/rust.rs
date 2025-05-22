@@ -182,11 +182,12 @@ impl Default for RustFile {
         Self {
             ind: 0,
             hotreload,
-            text:
+            text: [
 r#"mod internal {
     use std::ops::{Deref, DerefMut};
-
-    /// Wraps a mutable reference and discourages direct assignment via `*val = ...`.
+"#,
+            #[cfg(feature = "mut-guard")]
+r#"    /// Wraps a mutable reference and discourages direct assignment via `*val = ...`.
     ///
     /// This pattern encourages users to call methods for modification instead of
     /// reassigning the entire value. It still allows `Deref` and `DerefMut`, but these
@@ -210,37 +211,52 @@ r#"mod internal {
 
     impl<'a, T> GuardedMut<'a, T> {
         /// Wrap a mutable reference in a [`GuardedMut`] wrapper.
-        pub fn new(inner: &'a mut T) -> Self { Self(NoDirectAssign(inner)) }
+        fn new(inner: &'a mut T) -> Self { Self(NoDirectAssign(inner)) }
         /// Access the wrapped value through a [`NoDirectAssign`] reference.
         pub fn guard(&mut self) -> &mut NoDirectAssign<'a, T> { &mut self.0 }
+        /// extracts out the original value
+        pub unsafe fn unguard(self) -> &'a mut T { self.0.0 }
     }
     impl<'a, T> Deref for GuardedMut<'a, T> {
         type Target = NoDirectAssign<'a, T>;
         fn deref(&self) -> &Self::Target { &self.0 }
     }
 
-    pub trait GuardFrom where Self: Sized {
+    pub trait Guard where Self: Sized {
         type Input;
-        unsafe fn with_uninit(v: std::mem::MaybeUninit<Self::Input>) -> Self { Self::from(unsafe { v.assume_init() }) }
+        unsafe fn guard(v: std::mem::MaybeUninit<Self::Input>) -> Self { Self::from(unsafe { v.assume_init() }) }
         fn from(input: Self::Input) -> Self;
     }
-
-    impl<'a, T> GuardFrom for Option<GuardedMut<'a, T>> {
+    impl<'a, T> Guard for Option<GuardedMut<'a, T>> {
         type Input = Option<&'a mut T>;
-        fn from(v: Self::Input) -> Self {
-            v.map(GuardedMut::new)
-        }
+        fn from(v: Self::Input) -> Self { v.map(GuardedMut::new) }
     }
-
-    impl<'a, T> GuardFrom for GuardedMut<'a, T> {
+    impl<'a, T> Guard for GuardedMut<'a, T> {
         type Input = &'a mut T;
-        fn from(input: Self::Input) -> Self {
-            GuardedMut::new(input)
-        }
+        fn from(input: Self::Input) -> Self { GuardedMut::new(input) }
     }
-}
 
-pub use internal::{GuardedMut, GuardFrom};
+    pub trait Unguard {
+        type Output;
+        unsafe fn unguard(self: Self) -> Self::Output;
+    }
+    impl<'a, T> Unguard for &'a mut T {
+        type Output = Self;
+        unsafe fn unguard(self: Self) -> Self::Output { self }
+    }
+    impl<'a, T> Unguard for Option<GuardedMut<'a, T>> {
+        type Output = Option<&'a mut T>;
+        unsafe fn unguard(self: Self) -> Self::Output { self.map(|g| g.0.0) }
+    }
+
+    impl<'a, T> From<&'a mut T> for GuardedMut<'a, T> {
+        fn from(value: &'a mut T) -> Self { GuardedMut::new(value) }
+    }
+"#,
+r#"}"#,
+#[cfg(feature = "mut-guard")]
+r#"
+pub use internal::{GuardedMut, Guard, Unguard};
 
 /// A trait to convert into a [`GuardedMut`] reference if available.
 ///
@@ -256,7 +272,8 @@ impl<'a, T> AsGuardedMut<'a, T> for Option<GuardedMut<'a, T>> {
         self.as_mut().map(|g| g.guard())
     }
 }
-
+"#,
+r#"
 #[allow(dead_code)] mod zngur_types {
     pub struct ZngurCppOpaqueBorrowedObject(());
     #[repr(C)] pub struct ZngurCppOpaqueOwnedObject {
@@ -274,7 +291,7 @@ impl<'a, T> AsGuardedMut<'a, T> for Option<GuardedMut<'a, T>> {
 }
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueOwnedObject;
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueBorrowedObject;"#
-            .to_owned(),
+            ].map(|s| s.to_string()).join(""),
             panic_to_exception: false,
         }
     }
@@ -358,7 +375,7 @@ impl RustFile {
         }
         w!(self, "r.as_mut_ptr() as *mut u8);");
         if output.has_ref_mut() {
-            w!(self, "\n{ind}{}", OutputRustConstructorWrapper::new(&output, "r", &ind))
+            w!(self, "\n{ind}{}", OutputRustConstructorWrapper::new("r"))
         } else {
             w!(self, "\n{ind}r.assume_init()")
         }
@@ -780,36 +797,63 @@ pub(crate) fn {rust_name}("#
                     wln!(this, "    use ::{};", use_path.iter().join("::"));
                 }
             }
-            w!(this, "    ::std::ptr::write(o as *mut {output}, {rust_name}(");
+            w!(this, "    ::std::ptr::write(o as *mut {output}, ");
+            #[cfg(feature = "mut-guard")]
+            if is_guarded_type(output) {
+                w!(this, "Unguard::unguard(");
+            }
+            w!(this, "{rust_name}(");
             if deref {
                 w!(this, "&");
             }
 
             #[cfg(feature = "mut-guard")]
-            fn is_guarded_param(ty: &RustType) -> bool {
+            fn is_guarded_type(ty: &RustType) -> bool {
                 match ty {
-                    RustType::Ref(mutability, rust_type, _) if matches!(mutability, Mutability::Mut) => {
-                        match &**rust_type {
-                            RustType::Adt(_) => true,
+                    RustType::Ref(mutability, ty_ref, _) if matches!(mutability, Mutability::Mut) => {
+                        let is_prim = match &**ty_ref {
+                            RustType::Primitive(pty) => {
+                                match pty {
+                                    PrimitiveRustType::Uint(_) |
+                                    PrimitiveRustType::Int(_) => true,
+                                    _ => false,
+                                }
+                            },
                             _ => false,
+                        };
+
+                        if is_prim {
+                            false
+                        } else {
+                            println!("cargo:warning=REF-INNER {ty_ref}");
+                            true
                         }
+                    }
+                    RustType::Adt(RustPathAndGenerics { generics, named_generics, .. }) => {
+                        generics.iter().any(is_guarded_type) || named_generics.iter().any(|(_, ty)| is_guarded_type(ty))
                     }
                     _ => false,
                 }
             }
+
             #[cfg(feature = "mut-guard")]
             for (n, ty) in inputs.iter().enumerate() {
-                if (has_receiver && n == 0) || !(has_receiver && is_guarded_param(ty))  {
+                if (has_receiver && n == 0) || !(has_receiver && is_guarded_type(ty))  {
                     w!(this, "::std::ptr::read(i{n} as *mut {ty}), ");
                 } else {
-                    w!(this, "GuardedMut::new(::std::ptr::read(i{n} as *mut {ty})), ");
+                    w!(this, "Into::into(::std::ptr::read(i{n} as *mut {ty})), ");
                 }
             }
             #[cfg(not(feature = "mut-guard"))]
             for (n, ty) in inputs.iter().enumerate() {
                 w!(this, "::std::ptr::read(i{n} as *mut {ty}), ");
             }
-            w!(this, "));");
+            w!(this, ")");
+            #[cfg(feature = "mut-guard")]
+            if is_guarded_type(output) {
+                w!(this, ")");
+            }
+            w!(this, ");");
         });
         w!(self, "\n}} }}");
         mangled_name

@@ -268,12 +268,13 @@ impl Display for RustType {
 pub struct OutputRustTypeWrapper<'a> { ty: &'a RustType }
 impl<'a> OutputRustTypeWrapper<'a> { pub fn new(ty: &'a RustType) -> Self { Self { ty } } }
 impl<'a> Display for OutputRustTypeWrapper<'a> {
+    #[cfg(not(feature = "mut-guard"))]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // if self.ty.has_ref_mut() {
+        self.ty.fmt(f)
+    }
+    #[cfg(feature = "mut-guard")]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.ty.to_mut_guard_type().fmt(f)
-        // } else {
-        //     self.ty.fmt(f)
-        // }
     }
 }
 
@@ -287,6 +288,7 @@ impl RustType {
             _ => false,
         }
     }
+    #[cfg(feature = "mut-guard")]
     pub fn to_mut_guard_type(&self) -> RustType {
         match self {
             RustType::Ref(Mutability::Mut, rust_type, v) => {
@@ -320,33 +322,16 @@ impl RustType {
     }
 }
 
-pub struct OutputRustConstructorWrapper<'a> { ty: &'a RustType, varname: &'a str, ind: &'a str }
-impl<'a> OutputRustConstructorWrapper<'a> { pub fn new(ty: &'a RustType, varname: &'a str, indent: &'a str) -> Self { Self { ty, varname, ind: indent } } }
+pub struct OutputRustConstructorWrapper<'a> { varname: &'a str }
+impl<'a> OutputRustConstructorWrapper<'a> { pub fn new(varname: &'a str) -> Self { Self { varname } } }
 impl<'a> Display for OutputRustConstructorWrapper<'a> {
+    #[cfg(not(feature = "mut-guard"))]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // f.write_str(&format!("let ret: {} = {}.assume_init();", self.ty, self.varname))?;
-
-        // fn mapper_str(varname: &str, ty: &RustType) -> String {
-        //     match ty {
-        //         RustType::Ref(Mutability::Mut, _, _) => {
-        //             format!("GuardedMut::new({varname})")
-        //         }
-        //         RustType::Adt(RustPathAndGenerics { path, generics, .. }) if path == &["std", "option", "Option"] && generics.len() == 1 => {
-        //             let first = generics.first().unwrap();
-        //             match first {
-        //                 RustType::Ref(Mutability::Mut, _, _) => {
-        //                     format!("{varname}.map(GuardedMut::new)")
-        //                 }
-        //                 first => 
-        //                     format!("{varname}.map(|v| {})", mapper_str("v", first))
-        //             }
-        //         }
-        //         _ => varname.to_string(),
-        //     }
-        // }
-
-        // f.write_str(&format!("\n{}{}", self.ind, mapper_str("ret", self.ty)))
-        f.write_str(&format!("GuardFrom::with_uninit({})", self.varname))
+        f.write_str(&format!("{}.assume_init()", self.varname))
+    }
+    #[cfg(feature = "mut-guard")]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("Guard::guard({})", self.varname))
     }
 }
 

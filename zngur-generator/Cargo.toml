@@ -9,7 +9,7 @@ license.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-mut-guard = []
+mut-guard = ["zngur-def/mut-guard", "zngur-parser/mut-guard", "zngur-def/mut-guard"]
 hotreload = []
 std-namespace-fix = []
 edition-2024 = []

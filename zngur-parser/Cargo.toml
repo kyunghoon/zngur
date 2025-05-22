@@ -8,6 +8,9 @@ license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+mut-guard = ["zngur-def/mut-guard"]
+
 [dependencies]
 ariadne = "0.3.0"
 chumsky = { version = "=1.0.0-alpha.4", features = ["label"] }
