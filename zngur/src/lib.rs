@@ -5,6 +5,7 @@ mod parser;
 mod types;
 mod instantiate;
 mod cppwriter;
+mod cppjinjawriter;
 
 use std::{
     borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::{Path, PathBuf}

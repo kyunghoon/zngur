@@ -1,28 +1,38 @@
-use std::{borrow::Cow, cell::RefCell, collections::{hash_map::Entry, BTreeMap, HashMap, HashSet}, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, collections::{btree_map, hash_map, BTreeMap, HashMap, HashSet}, hash::Hash, path::PathBuf, rc::Rc};
 use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
-use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
-use crate::{instantiate::Instantiatable, types::{map_type_paths, TypeEnv, TypeEnvBuilder}, CppWriter};
+use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, PatType, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
+use crate::{cppjinjawriter::{CppJinjaWriter, CppMethod, CppMethodModifier, CppMethodVisibility}, instantiate::Instantiatable, types::{map_type_paths, TypeEnv, TypeEnvBuilder}, CppWriter};
 use super::{Result, Error, types};
 
 const META_TYPE_NAME: &'static str = "_Type";
 
+#[derive(Debug)]
 enum WellKnown {
     Sized,
     Copy,
 }
 
+#[derive(Debug)]
 enum ZngurAttribute {
     BindTo,
     WellKnown(Vec<WellKnown>),
-    CppValue(MetaList),
+    CppValue { index: u32, value: String },
     RustValue(MetaList),
-    CppRef(MetaList),
+    CppRef { value: String },
+    CppJinja(MetaList),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum CppPassingStyle { Ref, Value }
+
+#[derive(Debug, Clone)]
+pub struct CppJinjaConfig {
+    pub class_name: String,
+    pub h_path: PathBuf,
+    pub cpp_path: PathBuf,
+}
 
 enum Out {
     String(String),
@@ -168,12 +178,28 @@ impl ZngWriter {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TransferType { Import(Option<Vec<String>>), Export, Expose }
+enum TransferType { Import(Option<Vec<String>>), Export(Option<Vec<String>>), Expose }
 
 fn is_crate_mod_attribute(item_mod_attr: &Attribute) -> bool {
     match &item_mod_attr.meta {
         Meta::Path(p) if p.is_ident("crate") => true,
         _ => false,
+    }
+}
+
+fn parse_cpp_lines(list: MetaList) -> Result<Vec<String>> {
+    #[derive(Debug)]
+    struct LitStrList(Punctuated<LitStr, Option<Token![,]>>);
+    impl syn::parse::Parse for LitStrList {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            Ok(Self(Punctuated::parse_terminated(input)?))
+        }
+    }
+    if let Ok(list) = syn::parse2::<LitStrList>(list.tokens.clone()) {
+        Ok(list.0.into_iter().map(|l| l.value()).collect::<Vec<_>>())
+    } else {
+        let cpp_line = super::cppwriter::cpp::CppParser::parse(list.tokens)?;
+        Ok(vec![cpp_line])
     }
 }
 
@@ -187,10 +213,11 @@ pub fn remove_semicolon(token_stream: proc_macro2::TokenStream) -> Result<proc_m
     Ok(tokens.into_iter().collect())
 }
 
-fn extract_transfer_type_from_token_stream(token_stream: proc_macro2::TokenStream) -> Result<(proc_macro2::TokenStream, Option<TransferType>)> {
+fn extract_transfer_type_from_token_stream(token_stream: proc_macro2::TokenStream) -> Result<(proc_macro2::TokenStream, Option<TransferType>, Option<String>)> {
     let mut transfer_type = None;
     let mut result = Ok(false);
     let mut tokens = token_stream.into_iter().collect::<Vec<_>>();
+    let mut cpp_alias = None;
     let mut filtered_tokens: proc_macro2::TokenStream = tokens.windows(2).scan(&mut result, |skip, trees| {
         if matches!(skip, Ok(true)) {
             **skip = Ok(false);
@@ -211,36 +238,49 @@ fn extract_transfer_type_from_token_stream(token_stream: proc_macro2::TokenStrea
                             }
                             Some(id) if id == "export" => {
                                 **skip = Ok(true);
-                                transfer_type = Some(TransferType::Export);
+                                if let Ok(list) = syn::parse2::<MetaList>(g.stream()) {
+                                    match parse_cpp_lines(list) {
+                                        Err(e) => {
+                                            **skip = Err(e);
+                                            return None;
+                                        }
+                                        Ok(cpp_lines) => {
+                                            transfer_type = Some(TransferType::Export(Some(cpp_lines)));
+                                        }
+                                    }
+                                } else {
+                                    transfer_type = Some(TransferType::Export(None));
+                                }
                                 Some(None)
                             }
                             Some(id) if id == "import" => {
                                 **skip = Ok(true);
-                                if let Ok(MetaList { tokens, .. }) = syn::parse2::<MetaList>(g.stream()) {
-                                    #[derive(Debug)]
-                                    struct LitStrList(Punctuated<LitStr, Option<Token![,]>>);
-                                    impl syn::parse::Parse for LitStrList {
-                                        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-                                            Ok(Self(Punctuated::parse_terminated(input)?))
+                                if let Ok(list) = syn::parse2::<MetaList>(g.stream()) {
+                                    match parse_cpp_lines(list) {
+                                        Err(e) => {
+                                            **skip = Err(e);
+                                            return None;
                                         }
-                                    }
-                                    if let Ok(list) = syn::parse2::<LitStrList>(tokens.clone()) {
-                                        let cpp_lines = list.0.into_iter().map(|l| l.value()).collect::<Vec<_>>();
-                                        transfer_type = Some(TransferType::Import(Some(cpp_lines)))
-                                    } else {
-                                        match super::cppwriter::cpp::CppParser::parse(tokens) {
-                                            Err(e) => {
-                                                **skip = Err(e);
-                                                return None;
-                                            },
-                                            Ok(cpp_lines) => {
-                                                transfer_type = Some(TransferType::Import(Some(vec![cpp_lines])))
-                                            }
+                                        Ok(cpp_lines) => {
+                                            transfer_type = Some(TransferType::Import(Some(cpp_lines)));
                                         }
                                     }
                                 } else {
                                     transfer_type = Some(TransferType::Import(None));
                                 }
+                                Some(None)
+                            }
+                            Some(id) if id == "cpp_alias" => {
+                                if let Ok(Meta::List(MetaList { tokens, .. })) = syn::parse2::<Meta>(g.stream()) {
+                                    match syn::parse2::<LitStr>(tokens) {
+                                        Err(e) => {
+                                            **skip = Err(e.into());
+                                            return None;
+                                        }
+                                        Ok(lit) => cpp_alias = Some(lit.value()),
+                                    }
+                                }
+                                **skip = Ok(true);
                                 Some(None)
                             }
                             _ => {
@@ -261,7 +301,7 @@ fn extract_transfer_type_from_token_stream(token_stream: proc_macro2::TokenStrea
     if let Some(last) = tokens.pop() {
         filtered_tokens.append(last);
     }
-    Ok((filtered_tokens, transfer_type))
+    Ok((filtered_tokens, transfer_type, cpp_alias))
 }
 
 fn get_bind_path(attrs: &Vec<Attribute>) -> Option<Path> {
@@ -287,25 +327,38 @@ fn strip_docs_from_attributes(attrs: Vec<Attribute>) -> Vec<Attribute> {
         }
     }).collect()
 }
-fn extract_transfer_type_from_attributes(attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<TransferType>)> {
+fn extract_transfer_type_from_attributes(attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Option<TransferType>, Option<String>)> {
     let mut ty = None;
-    let mut span = Span::call_site();
-    let attrs = attrs.into_iter().filter_map(|attr| {
-        span = attr.span();
+    let mut cpp_alias = None;
+    let mut out_attrs: Vec<Attribute> = vec![];
+    for attr in attrs {
         if attr.meta.path().is_ident("expose") {
             if ty.is_none() { ty = Some(TransferType::Expose); }
-            None
         } else if attr.meta.path().is_ident("export") {
-            if ty.is_none() { ty = Some(TransferType::Export); }
-            None
+            if ty.is_none() {
+                if let Meta::List(list) = attr.meta {
+                    let cpp_lines = parse_cpp_lines(list)?;
+                    ty = Some(TransferType::Export(Some(cpp_lines)));
+                } else {
+                    ty = Some(TransferType::Export(None));
+                }
+            }
         } else if attr.meta.path().is_ident("import") {
-            if ty.is_none() { ty = Some(TransferType::Import(None)); }
-            None
+            if ty.is_none() {
+                if let Meta::List(list) = attr.meta {
+                    let cpp_lines = parse_cpp_lines(list)?;
+                    ty = Some(TransferType::Import(Some(cpp_lines)));
+                } else {
+                    ty = Some(TransferType::Import(None));
+                }
+            }
+        } else if attr.meta.path().is_ident("cpp_alias") {
+            if cpp_alias.is_none() { cpp_alias = Some("?[CPP-ALIAS]?".to_string()); }
         } else {
-            Some(attr)
+            out_attrs.push(attr);
         }
-    }).collect::<Vec<_>>();
-    Ok((attrs, ty))
+    }
+    Ok((out_attrs, ty, cpp_alias))
 }
 fn extract_cpp_template_args(attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<LitStr>)> {
     // Impl blocks either have no attributes or a simple `#[cpp_template(...)]` attribute
@@ -381,6 +434,7 @@ struct ParseState {
     structs_that_bind: HashMap<Ident, Path>,
     prelude_types: Rc<BTreeMap<Ident, Vec<Ident>>>,
     cpp_writer: Option<CppWriter>,
+    jinja_methods: BTreeMap<String, (CppJinjaConfig, BTreeMap<String, CppMethod>)>,
     specializations: Option<HashMap<Ident, HashSet<Specialization>>>,
     has_generated: bool,
     mode: ParseMode,
@@ -389,6 +443,10 @@ struct ParseState {
     type_env: Option<TypeEnv>,
     /// need to ensture specialzations are emitted in a consistent order
     specialzation_counter: usize,
+    /// maps rust types to cpp types declared in `cpp_ref` and `cpp_value`
+    type_mappings: HashMap<String, String>,
+    /// keeps track of enums types
+    enum_types: HashSet<String>,
 }
 impl ParseState {
     fn fully_qualify_path(&self, mut p: Path, lts: Option<&HashSet<Ident>>) -> Path {
@@ -445,6 +503,46 @@ impl ParseState {
             }
         }
     }
+    fn declare_jinja_type(&mut self, config: &CppJinjaConfig) {
+        assert_eq!(self.mode, ParseMode::Generate);
+        if let btree_map::Entry::Vacant(vacant_entry) = self.jinja_methods.entry(config.class_name.clone()) {
+            vacant_entry.insert((config.clone(), BTreeMap::new()));
+        }
+    }
+    fn declare_jinja_method(&mut self, config: &CppJinjaConfig, sig: &Signature, lines: Vec<String>, cpp_alias: Option<String>) {
+        assert_eq!(self.mode, ParseMode::Generate);
+        let method = CppMethod {
+            name: cpp_alias.unwrap_or_else(|| sig.ident.to_string()),
+            inputs: sig.inputs.iter().filter_map(|i| match i {
+                FnArg::Receiver(_) => None,
+                FnArg::Typed(PatType { pat, ty, .. }) => {
+                    let ident = match &**pat {
+                        Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                        _ => "???".into(),
+                    };
+                    Some((ident, *ty.clone()))
+                }
+            }).collect(),
+            output: match &sig.output {
+                ReturnType::Default => None,
+                ReturnType::Type(_, ty) => Some(*ty.clone()),
+            },
+            vis: CppMethodVisibility::Public,
+            modifier: {
+                match sig.inputs.first() {
+                    Some(FnArg::Receiver(r)) => CppMethodModifier::None { mutable: r.mutability.is_some() },
+                    _ => CppMethodModifier::Static,
+                }
+            },
+            lines,
+        };
+        match self.jinja_methods.entry(config.class_name.clone()) {
+            btree_map::Entry::Occupied(mut occupied_entry) =>
+                occupied_entry.get_mut().1.insert(sig.ident.to_string(), method),
+            btree_map::Entry::Vacant(vacant_entry) =>
+                vacant_entry.insert((config.clone(), BTreeMap::new())).1.insert(sig.ident.to_string(), method)
+        };
+    }
     fn collect_specialization(&mut self, type_path: TypePath) -> TypePath {
         let TypePath { qself, path } = type_path;
         if let Some(seg) = path.segments.last() {
@@ -470,9 +568,9 @@ impl ParseState {
                 };
                 if let Some(specializations) = self.specializations.as_mut() {
                     let _inserted = match specializations.entry(seg.ident.clone()) {
-                        Entry::Occupied(mut occupied_entry) =>
+                        hash_map::Entry::Occupied(mut occupied_entry) =>
                             occupied_entry.get_mut().insert(s),
-                        Entry::Vacant(vacant_entry) => {
+                        hash_map::Entry::Vacant(vacant_entry) => {
                             let mut set = HashSet::new();
                             set.insert(s);
                             vacant_entry.insert(set);
@@ -568,7 +666,8 @@ impl ParseState {
         on_use: &mut impl FnMut(&ItemUse),
         on_struct: &mut impl FnMut(&ItemStruct),
         on_enum: &mut impl FnMut(&ItemEnum),
-        on_impl: &mut impl FnMut(ImplKey, ItemImpl)
+        on_impl: &mut impl FnMut(ImplKey, ItemImpl),
+        on_type_mapping: &mut impl FnMut(&Ident, String),
     ) -> Result<ItemMod> {
         self.push_mod(&item_mod);
         item_mod.content = item_mod.content.map(|(b, items)| {
@@ -576,7 +675,7 @@ impl ParseState {
                 Item::Mod(item_mod) => {
                     let is_crate_mod = item_mod.attrs.iter().any(is_crate_mod_attribute);
                     on_mod_push(&item_mod, is_crate_mod);
-                    let item_mod = self.scan(item_mod, on_should_bind, on_mod_push, on_mod_pop, on_use, on_struct, on_enum, on_impl)?;
+                    let item_mod = self.scan(item_mod, on_should_bind, on_mod_push, on_mod_pop, on_use, on_struct, on_enum, on_impl, on_type_mapping)?;
                     on_mod_pop(&item_mod, is_crate_mod);
                     Ok(Item::Mod(item_mod))
                 },
@@ -588,7 +687,23 @@ impl ParseState {
                     if let Some(path) = get_bind_path(&item_struct.attrs) {
                         on_should_bind(&item_struct.ident, &path);
                     }
+                    let (_, zng_attrs) = self.parse_meta_attributes(item_struct.attrs.clone())?;
                     on_struct(&item_struct);
+
+                    for attr in zng_attrs {
+                        match attr {
+                            ZngurAttribute::CppValue { value, .. } => {
+                                on_type_mapping(&item_struct.ident, value);
+                                break;
+                            }
+                            ZngurAttribute::CppRef { value } => {
+                                on_type_mapping(&item_struct.ident, value);
+                                break;
+                            }
+                            _ => ()
+                        }
+                    }
+
                     Ok(Item::Struct(item_struct))
                 }
                 Item::Enum(item_enum) => {
@@ -706,10 +821,10 @@ impl ParseState {
         Ok(Some(item))
     }
     fn parse_enum(&mut self, zng_writer: &mut ZngWriter, mut item_enum: ItemEnum, is_crate: bool) -> Result<Option<ItemEnum>> {
-        let (attrs, transfer_type) = extract_transfer_type_from_attributes(item_enum.attrs)?;
+        let (attrs, transfer_type, _) = extract_transfer_type_from_attributes(item_enum.attrs)?;
         item_enum.attrs = attrs;
 
-        if matches!(transfer_type, Some(TransferType::Expose)) || matches!(transfer_type, Some(TransferType::Export)) {
+        if matches!(transfer_type, Some(TransferType::Expose)) || matches!(transfer_type, Some(TransferType::Export(_))) {
             let key = ImplKey::with_item_enum(self.cratepath(false), &item_enum);
             let enum_impl = self.impls.remove(&key);
 
@@ -874,9 +989,10 @@ impl ParseState {
         zng_writer.wl("STATIC".into());
         Ok(Some(item))
     }
-    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: &Vec<ZngurAttribute>, template_args: Vec<(LitStr, &Ident)>) -> Result<(Option<CppPassingStyle>, bool, bool)> {
+    fn parse_zngur_meta_attributes(&mut self, zng_writer: &mut ZngWriter, zng_attrs: &Vec<ZngurAttribute>, template_args: Vec<(LitStr, &Ident)>) -> Result<(Option<CppPassingStyle>, Option<CppJinjaConfig>, bool, bool)> {
         let mut needs_layout = true;
         let mut passing_style = None;
+        let mut jinja_config = None;
         let mut should_bind = false;
         for zattr in zng_attrs {
             match zattr {
@@ -896,22 +1012,13 @@ impl ParseState {
                         }
                     }
                 },
-                ZngurAttribute::CppValue(meta_list) => {
+                ZngurAttribute::CppValue { index, value} => {
+                    let mut cpp_value = value.to_owned();
                     zng_writer.wl("constructor(ZngurCppOpaqueOwnedObject);".into());
-                    let span = meta_list.span();
-                    let Ok(args) = meta_list.parse_args_with(
-                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
-                        return Err(Error::new(span, format!("invalid cpp_value token list").into()));
-                    };
-                    let mut ai = args.into_iter();
-                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
-                        return Err(Error::new(span, "invalid cpp_value token".into()))
-                    }; 
-                    let mut cpp_value = b.value();
                     for (v, p) in template_args.iter() {
                         cpp_value = cpp_value.replace(&format!("{{{}}}", p.to_token_stream()), &v.value());
                     }
-                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", a.base10_digits(), cpp_value).into());
+                    zng_writer.wl(format!("#cpp_value \"{}\" \"{}\";", index, cpp_value).into());
                     passing_style = Some(CppPassingStyle::Value);
                 },
                 ZngurAttribute::RustValue(meta_list) => {
@@ -926,30 +1033,49 @@ impl ParseState {
                     }; 
                     zng_writer.wl(format!("#rust_value \"{}\" \"{}\";", a.base10_digits(), b.value()).into());
                 },
-                ZngurAttribute::CppRef(meta_list) => {
-                    let span = meta_list.span();
-                    let Ok(args) = meta_list.parse_args_with(
-                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
-                        return Err(Error::new(span, format!("invalid cpp_ref token list").into()));
-                    };
-                    let mut ai = args.into_iter();
-                    let (Some(Lit::Str(a)), None) = (ai.next(), ai.next()) else {
-                        return Err(Error::new(span, format!("invalid cpp_ref token").into()));
-                    };
-                    zng_writer.wl(format!("#cpp_ref \"{}\";", a.value()).into());
+                ZngurAttribute::CppRef { value } => {
+                    zng_writer.wl(format!("#cpp_ref \"{}\";", value).into());
                     needs_layout = false;
                     passing_style = Some(CppPassingStyle::Ref);
                 },
+                ZngurAttribute::CppJinja(meta_list) => {
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid cpp_jinja token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Str(a)), Some(Lit::Str(b)), Some(Lit::Str(c)), None) = (ai.next(), ai.next(), ai.next(), ai.next()) else {
+                        return Err(Error::new(span, "invalid cpp_jinja token".into()))
+                    }; 
+                    let h_path = b.value();
+                    let cpp_path = c.value();
+                    if !h_path.ends_with(".jinja") {
+                        return Err(Error::new(b.span(), b.value().into()));
+                    }
+                    if !cpp_path.ends_with(".jinja") {
+                        return Err(Error::new(b.span(), "expected .jinja extension".into()))
+                    }
+                    let mut h_path: PathBuf = h_path.into();
+                    h_path.set_extension("");
+                    let mut cpp_path: PathBuf = cpp_path.into();
+                    cpp_path.set_extension("");
+                    jinja_config = Some(CppJinjaConfig {
+                        class_name: a.value(),
+                        h_path,
+                        cpp_path,
+                    });
+                }
             }
         }
 
-        Ok((passing_style, should_bind, needs_layout))
+        Ok((passing_style, jinja_config, should_bind, needs_layout))
     }
     fn parse_meta_attributes(&mut self, attrs: Vec<Attribute>) -> Result<(Vec<Attribute>, Vec<ZngurAttribute>)> {
         let mut zng_attrs = vec![];
-        let attrs = attrs.into_iter().filter_map(|attr| {
-            let Attribute { pound_token, style, bracket_token, meta } = attr;
-            let meta = match meta {
+        let mut out_attrs = vec![];
+        for mut attr in attrs {
+            let meta = match attr.meta {
                 Meta::List(meta_list) if meta_list.path.is_ident("bind_to") => {
                     zng_attrs.push(ZngurAttribute::BindTo);
                     None
@@ -995,7 +1121,16 @@ impl ParseState {
                     Some(Meta::List(meta_list))
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_value") => {
-                    zng_attrs.push(ZngurAttribute::CppValue(meta_list));
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid cpp_value token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Int(a)), Some(Lit::Str(b)), None) = (ai.next(), ai.next(), ai.next()) else {
+                        return Err(Error::new(span, "invalid cpp_value token".into()))
+                    }; 
+                    zng_attrs.push(ZngurAttribute::CppValue { index: a.base10_parse()?, value: b.value() });
                     None
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("rust_value") => {
@@ -1003,14 +1138,31 @@ impl ParseState {
                     None
                 }
                 Meta::List(meta_list) if meta_list.path.is_ident("cpp_ref") => {
-                    zng_attrs.push(ZngurAttribute::CppRef(meta_list));
+                    let span = meta_list.span();
+                    let Ok(args) = meta_list.parse_args_with(
+                        Punctuated::<Lit, syn::Token![,]>::parse_terminated) else {
+                        return Err(Error::new(span, format!("invalid cpp_ref token list").into()));
+                    };
+                    let mut ai = args.into_iter();
+                    let (Some(Lit::Str(a)), None) = (ai.next(), ai.next()) else {
+                        return Err(Error::new(span, format!("invalid cpp_ref token").into()));
+                    };
+                    zng_attrs.push(ZngurAttribute::CppRef { value: a.value() });
+                    None
+                }
+                Meta::List(meta_list) if meta_list.path.is_ident("cpp_jinja") => {
+                    zng_attrs.push(ZngurAttribute::CppJinja(meta_list));
                     None
                 }
                 x => Some(x),
             };
-            meta.map(|meta| Attribute { pound_token, style, bracket_token, meta })
-        }).collect::<Vec<_>>();
-        Ok((attrs, zng_attrs))
+
+            if let Some(meta) = meta {
+                attr.meta = meta;
+                out_attrs.push(attr);
+            }
+        }
+        Ok((out_attrs, zng_attrs))
     }
 
     fn eval_type_path(&self, ty: Type, lts: Option<&HashSet<Ident>>) -> Type {
@@ -1036,7 +1188,7 @@ impl ParseState {
             zng_writer.indent_level += 1;
             let (attrs, zng_attrs) = self.parse_meta_attributes(item.attrs)?;
             item.attrs = attrs;
-            let (passing_style, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, &zng_attrs, vec![])?;
+            let (passing_style, _, _, needs_layout) = self.parse_zngur_meta_attributes(zng_writer, &zng_attrs, vec![])?;
             if needs_layout && num_generics == 0 {
                 zng_writer.layout(ty.to_token_stream().to_string());
             }
@@ -1117,7 +1269,7 @@ impl ParseState {
         Ok(Some(item))
     }
     fn parse_verbatim(&mut self, zng_writer: &mut ZngWriter, token_stream: proc_macro2::TokenStream) -> Result<Option<proc_macro2::TokenStream>> {
-        let (token_stream, transfer_type) = extract_transfer_type_from_token_stream(token_stream.clone())?;
+        let (token_stream, transfer_type, _) = extract_transfer_type_from_token_stream(token_stream.clone())?;
         match transfer_type {
             Some(TransferType::Expose) => {
                 let token_stream = remove_semicolon(token_stream)?;
@@ -1125,7 +1277,7 @@ impl ParseState {
                 self.parse_sig(zng_writer, None, item_fn.sig, None)?;
                 Ok(None)
             }
-            Some(TransferType::Export) => {
+            Some(TransferType::Export(..)) => {
                 Ok(Some(token_stream))
             }
             Some(TransferType::Import(cpp_lines)) => {
@@ -1244,10 +1396,10 @@ impl ParseState {
             }
             ImplItem::Fn(impl_item_fn) => {
                 let ImplItemFn { attrs, vis, defaultness, mut sig, block } = impl_item_fn;
-                let (attrs, transfer_type) = extract_transfer_type_from_attributes(attrs)?;
+                let (attrs, transfer_type, _) = extract_transfer_type_from_attributes(attrs)?;
                 if transfer_type.as_ref().map(|t| matches!(t, TransferType::Import(..))).unwrap_or_default() {
                     Err(Error::new(block.span(), "imports cannot have an implementation".into()))
-                } else if transfer_type == Some(TransferType::Export) {
+                } else if matches!(transfer_type, Some(TransferType::Export(..))) {
                     let prev_disabled = if !is_extern_cpp { None } else { Some(zng_writer.disabled) };
                     if prev_disabled.is_some() { zng_writer.disabled = true; }
                     sig = self.parse_sig(zng_writer, self_ident, sig, lts)?;
@@ -1319,7 +1471,7 @@ impl ParseState {
                 Ok(Some(syn::ImplItem::Macro(impl_item_macro)))
             }
             ImplItem::Verbatim(token_stream) => {
-                let (token_stream, transfer_type) = extract_transfer_type_from_token_stream(token_stream)?;
+                let (token_stream, transfer_type, _) = extract_transfer_type_from_token_stream(token_stream)?;
                 match transfer_type {
                     Some(TransferType::Expose) => {
                         let token_stream = remove_semicolon(token_stream)?;
@@ -1327,7 +1479,7 @@ impl ParseState {
                         self.parse_sig(zng_writer, self_ident, impl_fn.sig, lts)?;
                         Ok(None)
                     }
-                    Some(TransferType::Export) => {
+                    Some(TransferType::Export(..)) => {
                         let should_bind = self_ident.map(|id| self.structs_that_bind.contains_key(id)).unwrap_or_default();
                         if should_bind {
                             let token_stream = remove_semicolon(token_stream)?;
@@ -1434,6 +1586,9 @@ impl Parser {
                 deferred_instantiated_items: Some(Default::default()),
                 type_env: None,
                 specialzation_counter: 0,
+                jinja_methods: BTreeMap::new(),
+                type_mappings: Default::default(),
+                enum_types: Default::default(),
             },
             zng_writer: ZngWriter::new(skip_artifacts),
         };
@@ -1451,12 +1606,26 @@ impl Parser {
         self.state.cpp_writer = Some(writer);
     }
     pub fn take_cpp_writer(&mut self) -> Option<CppWriter> { self.state.cpp_writer.take() }
+    pub fn take_cpp_jinja_writers(&mut self, templates_path: &std::path::Path, context: HashMap<String, String>) -> Vec<CppJinjaWriter> {
+        let mut methods = BTreeMap::new();
+        std::mem::swap(&mut methods, &mut self.state.jinja_methods);
+        methods.into_iter().map(|(class_name, (config, methods))| {
+            let mut writer = CppJinjaWriter::new(templates_path, class_name, &context, config, &self.state.type_mappings, &self.state.enum_types);
+            for method in methods.into_values() {
+                writer.add_method(method);
+            }
+            writer
+        }).collect()
+    }
     pub fn parse(&mut self, item: ItemMod) -> Result<Vec<Item>> {
         let mut structs_that_bind = HashMap::<Ident, Path>::new();
         let mut impls = HashMap::<ImplKey, ItemImpl>::new();
+        let mut type_mappings = HashMap::<String, String>::new();
+        let mut enum_types = HashSet::<String>::new();
         let tenv_builder = RefCell::new(if self.state.mode == ParseMode::Generate {
             Some(TypeEnvBuilder::new(&*self.state.prelude_types))
         } else { None });
+        let is_generate_mode = self.state.mode == ParseMode::Generate;
         let item = self.state.scan(
             item,
             &mut|ident, path| {
@@ -1472,16 +1641,25 @@ impl Parser {
                 tenv_builder.borrow_mut().as_mut().map(|e| e.do_use(item_use));
             },
             &mut |item| {
+                // println!("cargo:warning=ZATTR {} {:?}", item.ident, zng_attrs);
                 if item.ident != META_TYPE_NAME {
                     tenv_builder.borrow_mut().as_mut().map(|e| e.do_struct(item));
                 }
             },
             &mut |item| {
+                if is_generate_mode {
+                    enum_types.insert(item.ident.to_string());
+                }
                 tenv_builder.borrow_mut().as_mut().map(|e| e.do_enum(item));
             },
             &mut |key, item_impl| {
                 impls.insert(key, item_impl);
-            }
+            },
+            &mut |id, value| {
+                if is_generate_mode {
+                    type_mappings.insert(id.to_string(), value);
+                }
+            },
         )?;
         if let Some(builder) = tenv_builder.take() {
             let type_env = builder.build();
@@ -1489,6 +1667,8 @@ impl Parser {
         }
         self.state.impls = impls;
         self.state.structs_that_bind = structs_that_bind;
+        self.state.type_mappings = type_mappings;
+        self.state.enum_types = enum_types;
 
         let items = self.state.parse_mod(&mut self.zng_writer, item)?.and_then(|item|
             item.content.map(|(_, items)| items)).unwrap_or_default();
@@ -1626,7 +1806,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
         item_impl = Some(imp);
     }
 
-    let (passing_style, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, &zng_attrs, template_args)?;
+    let (passing_style, jinja_config, should_bind, needs_layout) = state.parse_zngur_meta_attributes(zng_writer, &zng_attrs, template_args)?;
     if needs_layout {
         if let Some(args) = type_args {
             zng_writer.layout(format!("{} < {} > ", item.ident, args.values().map(|ty| ty.to_token_stream().to_string()).collect::<Vec<_>>().join(", ")));
@@ -1643,9 +1823,9 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                 if should_bind {
                     for item in imp.items.iter() {
                         if let ImplItem::Fn(impl_fn) = item {
-                            let (_, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
-                            if transfer_type == Some(TransferType::Export) {
-                                let span =     impl_fn.block.brace_token.span.span();
+                            let (_, transfer_type, _) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
+                            if matches!(transfer_type, Some(TransferType::Export(..))) {
+                                let span = impl_fn.block.brace_token.span.span();
                                 return Err(Error::new(span, "Syntax Error: bounded export functions cannot have a body".into()));
                             }
                         }
@@ -1653,8 +1833,8 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                 }
             }
             ParseMode::Generate => {
+                let mut needs_trait = false;
                 if should_bind {
-                    let mut needs_trait = false;
                     for i in imp.items.iter() {
                         match i {
                             ImplItem::Fn(f) if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) => {
@@ -1662,8 +1842,8 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                                 break;
                             }
                             ImplItem::Verbatim(token_stream) => {
-                                let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone())?;
-                                if matches!(transfer_type, Some(TransferType::Export)) {
+                                let (token_stream, transfer_type, _)  = extract_transfer_type_from_token_stream(token_stream.clone())?;
+                                if matches!(transfer_type, Some(TransferType::Export(..))) {
                                     let token_stream = remove_semicolon(token_stream)?;
                                     let f: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
                                     if matches!(f.sig.inputs.first(), Some(FnArg::Receiver(_))) {
@@ -1675,65 +1855,85 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                             _ => continue,
                         }
                     }
+                }
 
-                    if needs_trait {
-                        let mut trait_fns = vec![];
-                        imp.items.iter().map(|item| match item {
-                            ImplItem::Fn(impl_fn) => {
-                                let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
-                                let (attrs, transfer_type) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
-                                if !is_static && transfer_type == Some(TransferType::Export) {
+                if let Some(config) = &jinja_config {
+                    state.declare_jinja_type(config);
+                }
+
+                let mut trait_fns = vec![];
+                imp.items.iter().map(|item| match item {
+                    ImplItem::Fn(impl_fn) => {
+                        let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+                        let (attrs, transfer_type, cpp_alias) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
+                        if let Some(TransferType::Export(Some(lines))) = transfer_type {
+                            if let Some(config) = &jinja_config {
+                                state.declare_jinja_method(&config, &impl_fn.sig, lines, cpp_alias);
+                            }
+                            if !is_static && needs_trait {
+                                trait_fns.push(TraitItemFn {
+                                    attrs,
+                                    sig: impl_fn.sig.clone(),
+                                    default: None,
+                                    semi_token: None,
+                                });
+                            }
+                        }
+                        Ok(())
+                    }
+                    ImplItem::Verbatim(token_stream) => {
+                        let (token_stream, transfer_type, cpp_alias)  = extract_transfer_type_from_token_stream(token_stream.clone()).unwrap();
+                        if matches!(transfer_type, Some(TransferType::Export(..))) || matches!(transfer_type, None) {
+                            let token_stream = remove_semicolon(token_stream)?;
+                            let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
+                            let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+
+                            if let Some(TransferType::Export(Some(lines))) = transfer_type {
+                                if let Some(config) = &jinja_config{
+                                    state.declare_jinja_method(&config, &impl_fn.sig, lines, cpp_alias);
+                                }
+                            }
+
+                            // snakecase identifiers
+                            impl_fn.sig.ident = Ident::new(&impl_fn.sig.ident.to_string().to_snake_case(), impl_fn.sig.ident.span());
+                            impl_fn.sig.inputs = impl_fn.sig.inputs.into_iter().map(|i| {
+                                match i {
+                                    FnArg::Typed(mut pat_type) => {
+                                        pat_type.pat = Box::new(match *pat_type.pat {
+                                            Pat::Ident(mut pat_id) => {
+                                                pat_id.ident =
+                                                    Ident::new(&pat_id.ident.to_string().to_snake_case(), pat_id.ident.span());
+                                                Pat::Ident(pat_id)
+                                            }
+                                            pat => pat
+                                        });
+                                        FnArg::Typed(pat_type)
+                                    }
+                                    i => i,
+                                }
+                            }).collect();
+
+                            if !is_static {
+                                if needs_trait {
                                     trait_fns.push(TraitItemFn {
-                                        attrs,
-                                        sig: impl_fn.sig.clone(),
+                                        attrs: impl_fn.attrs,
+                                        sig: to_guarded_signature(impl_fn.sig, state.mode),
                                         default: None,
                                         semi_token: None,
                                     });
                                 }
-                                Ok(())
                             }
-                            ImplItem::Verbatim(token_stream) => {
-                                let (token_stream, transfer_type)  = extract_transfer_type_from_token_stream(token_stream.clone()).unwrap();
-                                if matches!(transfer_type, Some(TransferType::Export)) || matches!(transfer_type, None) {
-                                    let token_stream = remove_semicolon(token_stream)?;
-                                    let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                                    let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
-
-                                    impl_fn.sig.ident = Ident::new(&impl_fn.sig.ident.to_string().to_snake_case(), impl_fn.sig.ident.span());
-                                    impl_fn.sig.inputs = impl_fn.sig.inputs.into_iter().map(|i| {
-                                        match i {
-                                            FnArg::Typed(mut pat_type) => {
-                                                pat_type.pat = Box::new(match *pat_type.pat {
-                                                    Pat::Ident(mut pat_id) => {
-                                                        pat_id.ident =
-                                                            Ident::new(&pat_id.ident.to_string().to_snake_case(), pat_id.ident.span());
-                                                        Pat::Ident(pat_id)
-                                                    }
-                                                    pat => pat
-                                                });
-                                                FnArg::Typed(pat_type)
-                                            }
-                                            i => i,
-                                        }
-                                    }).collect();
-                                    if !is_static {
-                                        trait_fns.push(TraitItemFn {
-                                            attrs: impl_fn.attrs,
-                                            sig: to_guarded_signature(impl_fn.sig, state.mode),
-                                            default: None,
-                                            semi_token: None,
-                                        });
-                                    }
-                                }
-                                Ok(())
-                            }
-                            _ => Ok(())
-                        }).collect::<Result<()>>()?;
-                        let trait_id = Ident::new(&(item.ident.to_string() + "Trait"), Span::call_site());
-                        let trait_: ItemTrait = parse_quote!{ pub trait #trait_id { #(#trait_fns)* } };
-                        state.bind_traits.push(trait_);
-                        bind_id = Some(trait_id);
+                        }
+                        Ok(())
                     }
+                    _ => Ok(())
+                }).collect::<Result<()>>()?;
+
+                if needs_trait {
+                    let trait_id = Ident::new(&(item.ident.to_string() + "Trait"), Span::call_site());
+                    let trait_: ItemTrait = parse_quote!{ pub trait #trait_id { #(#trait_fns)* } };
+                    state.bind_traits.push(trait_);
+                    bind_id = Some(trait_id);
                 }
             }
         }

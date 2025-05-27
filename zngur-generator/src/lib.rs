@@ -1,7 +1,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::HashSet;
 
-use cpp::cpp_handle_keyword;
+use cpp::sanitize_cpp_keywords;
 use cpp::CppExportedFnDefinition;
 use cpp::CppExportedImplDefinition;
 use cpp::CppFile;
@@ -82,7 +82,7 @@ impl ZngurGenerator {
                             ty_def.rust_value.as_ref(),
                         );
                         cpp_methods.push(CppMethod {
-                            name: cpp_handle_keyword(&name).to_owned(),
+                            name: sanitize_cpp_keywords(&name).to_owned(),
                             kind: ZngurMethodReceiver::Static,
                             sig: CppFnSig {
                                 rust_link_name: rust_link_names.constructor,
@@ -148,7 +148,7 @@ impl ZngurGenerator {
                     deref.is_some(),
                 );
                 cpp_methods.push(CppMethod {
-                    name: cpp_handle_keyword(&method.name).to_owned(),
+                    name: sanitize_cpp_keywords(&method.name).to_owned(),
                     kind: method.receiver,
                     sig: CppFnSig {
                         rust_link_name,
@@ -252,7 +252,7 @@ impl ZngurGenerator {
                     .map(|(method, link_name)| {
                         let (_, inputs) = real_inputs_of_method(method, &impl_block.ty);
                         (
-                            cpp_handle_keyword(&method.name).to_owned(),
+                            sanitize_cpp_keywords(&method.name).to_owned(),
                             CppFnSig {
                                 rust_link_name: link_name.clone(),
                                 inputs,

@@ -825,7 +825,6 @@ pub(crate) fn {rust_name}("#
                         if is_prim {
                             false
                         } else {
-                            println!("cargo:warning=REF-INNER {ty_ref}");
                             true
                         }
                     }

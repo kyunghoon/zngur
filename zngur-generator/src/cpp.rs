@@ -66,7 +66,7 @@ impl CppPath {
         CppPath(
             iter::once("rust")
                 .chain(path.iter().map(|x| x.as_str()))
-                .map(cpp_handle_keyword)
+                .map(sanitize_cpp_keywords)
                 .map(|x| x.to_owned())
                 .collect(),
         )
@@ -1860,10 +1860,12 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
     }
 }
 
-pub fn cpp_handle_keyword(name: &str) -> &str {
+pub fn sanitize_cpp_keywords(name: &str) -> &str {
     match name {
         "new" => "new_",
         "default" => "default_",
+        "static" => "static_",
+        "virtual" => "virtual_",
         x => x,
     }
 }
