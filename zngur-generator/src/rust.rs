@@ -277,17 +277,17 @@ r#"
 #[allow(dead_code)] mod zngur_types {
     pub struct ZngurCppOpaqueBorrowedObject(());
     #[repr(C)] pub struct ZngurCppOpaqueOwnedObject {
-        data: *mut u8,
-        destructor: extern "C" fn(*mut u8),
+        data: usize,
+        destructor: extern "C" fn(usize),
     }
     impl ZngurCppOpaqueOwnedObject {
-        pub unsafe fn new(data: *mut u8, destructor: extern "C" fn(*mut u8)) -> Self { Self { data, destructor } }
-        pub fn ptr(&self) -> *mut u8 { self.data }
+        pub unsafe fn new(data: *mut u8, destructor: extern "C" fn(usize)) -> Self { Self { data: data as usize, destructor } }
+        pub fn ptr(&self) -> *mut u8 { self.data as *mut u8 }
         pub fn is_owned(&self) -> bool { unsafe { std::mem::transmute::<_, usize>(self.data) % 2 != 0 } }
         pub fn inner<T>(&self) -> Option<&T> { if !self.is_owned() { None } else { Some(unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }) } }
         pub fn unmark_owned(&mut self) -> &mut Self { if self.is_owned() { self.data = unsafe { std::mem::transmute(std::mem::transmute::<_, usize>(self.data) - 1) }; } self }
     }
-    impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { if !self.data.is_null() { (self.destructor)(self.data) } } }
+    impl Drop for ZngurCppOpaqueOwnedObject { fn drop(&mut self) { if !(self.data as *const u8).is_null() { (self.destructor)(self.data) } } }
 }
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueOwnedObject;
 #[allow(unused_imports)] pub use zngur_types::ZngurCppOpaqueBorrowedObject;"#
@@ -447,7 +447,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         let (trait_without_assocs, assocs) = tr.tr.clone().take_assocs();
         let mangled_name = mangle_name(&trait_name);
         w!(self, r#"
-#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), o: *mut u8) {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(usize), o: *mut u8) {{
     struct Wrapper {{ value: ZngurCppOpaqueOwnedObject }}
     impl {trait_without_assocs} for Wrapper {{
 "#
@@ -555,7 +555,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         let mangled_name = mangle_name(&inputs.iter().chain(Some(output)).join(", "));
         let trait_str = format!("{name}({}) -> {}", inputs.iter().join(", "), OutputRustTypeWrapper::new(&output));
         w!(self, r#"
-#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(*mut u8), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {mangled_name}(data: *mut u8, destructor: extern "C" fn(usize), call: extern "C" fn(data: *mut u8, {} o: *mut u8), o: *mut u8) {{
     let this = unsafe {{ ZngurCppOpaqueOwnedObject::new(data, destructor) }};
     let r: Box<dyn {trait_str}> = Box::new(move |{}| unsafe {{
         _ = &this;

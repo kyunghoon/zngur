@@ -454,7 +454,7 @@ impl CppTraitDefinition {
                         }
                     }
                     EmitMode::Rust(_) =>
-                        write!(state, "\n    pub {rust_link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(*mut u8), call: extern \"C\" fn(*mut u8, {} *mut u8), o: *mut u8),",
+                        write!(state, "\n    pub {rust_link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(usize), call: extern \"C\" fn(*mut u8, {} *mut u8), o: *mut u8),",
                             (0..inputs.len()).map(|_| "*mut u8, ").join(" "))?,
                     EmitMode::RustLinkNameOnly(_) => write!(state, "\n        {rust_link_name},")?,
                 }
@@ -475,7 +475,7 @@ impl CppTraitDefinition {
                         }
                     }
                     EmitMode::Rust(_) => {
-                        write!(state, "\n    pub {link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(*mut u8), o: *mut u8),")?;
+                        write!(state, "\n    pub {link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(usize), o: *mut u8),")?;
                         write!(state, "\n    pub {link_name_ref}: extern \"C\" fn(data: *mut u8, o: *mut u8),")?;
                     }
                     EmitMode::RustLinkNameOnly(_) => {

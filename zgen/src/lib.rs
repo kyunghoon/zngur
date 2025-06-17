@@ -90,8 +90,8 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
             pub mod generated {
                 pub struct ZngurCppOpaqueBorrowedObject<T: ?Sized=()>((), std::marker::PhantomData<T>);
                 #[repr(C)] pub struct ZngurCppOpaqueOwnedObject<T: ?Sized=()> {
-                    data: *mut u8,
-                    destructor: extern "C" fn(*mut u8),
+                    data: usize,
+                    destructor: extern "C" fn(usize),
                     _marker: std::marker::PhantomData<T>,
                 }
             }
