@@ -1864,7 +1864,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                 let mut trait_fns = vec![];
                 imp.items.iter().map(|item| match item {
                     ImplItem::Fn(impl_fn) => {
-                        let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+                        let is_static = impl_fn.sig.inputs.is_empty() || impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
                         let (attrs, transfer_type, cpp_alias) = extract_transfer_type_from_attributes(impl_fn.attrs.clone())?;
                         if let Some(TransferType::Export(Some(lines))) = transfer_type {
                             if let Some(config) = &jinja_config {
@@ -1886,7 +1886,7 @@ fn write_struct(item: &ItemStruct, type_args: Option<&HashMap<Ident, Type>>, fro
                         if matches!(transfer_type, Some(TransferType::Export(..))) || matches!(transfer_type, None) {
                             let token_stream = remove_semicolon(token_stream)?;
                             let mut impl_fn: ImplItemFn = parse_quote! { #token_stream { unimplemented!() } };
-                            let is_static = impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
+                            let is_static = impl_fn.sig.inputs.is_empty() || impl_fn.sig.inputs.first().map(|fst| !matches!(fst, FnArg::Receiver(..))).unwrap_or_default();
 
                             if let Some(TransferType::Export(Some(lines))) = transfer_type {
                                 if let Some(config) = &jinja_config{
