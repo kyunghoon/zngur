@@ -1804,6 +1804,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
             writeln!(state, "   }};")?;
             write!(state, "}}")?;
         }
+        /*
         writeln!(state, "\n\n/* [Signatures]")?;
         SIG_OUTPUT.store(true, Ordering::SeqCst);
         for imp in &self.exported_impls {
@@ -1829,6 +1830,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         }
         writeln!(state, "*/")?;
         SIG_OUTPUT.store(false, Ordering::SeqCst);
+        */
         Ok(())
     }
 
