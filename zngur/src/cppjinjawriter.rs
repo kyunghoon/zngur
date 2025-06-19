@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf};
-use syn::{GenericArgument, PathArguments, Type, TypePath, TypeReference};
+use syn::{GenericArgument, PathArguments, Type, TypePath, TypeReference, TypeSlice};
 use zngur_generator::cpp::sanitize_cpp_keywords;
 
 use crate::parser::CppJinjaConfig;
@@ -215,6 +215,9 @@ impl<'a> CppJinjaWriter<'a> {
                 } else {
                     format!("{} const&", self.to_cpp_type(&*elem))
                 }
+            }
+            Type::Slice(TypeSlice { elem, .. }) => {
+                format!("::rust::Ref<::rust::Slice<{}>>", self.to_cpp_type(&*elem))
             }
             x => format!("/*[5]{:?}*/", x),
         }
