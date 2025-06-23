@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashSet, fmt::Write};
 use itertools::Itertools;
 
 use crate::{
-    cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType},
+    cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType, EnumClass},
     ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData,
 };
 
@@ -39,7 +39,7 @@ impl IntoCpp for RustPathAndGenerics {
                 .chain(named_generics)
                 .map(|x| x.into_cpp())
                 .collect(),
-            is_enum: false,
+            enum_class: None,
         }
     }
 }
@@ -49,7 +49,7 @@ impl IntoCpp for RustEnum {
         CppType {
             path: CppPath::from_rust_path(&self.path),
             generic_args: vec![],
-            is_enum: true,
+            enum_class: Some(if self.wrapped { EnumClass::Wrapped } else { EnumClass::Basic }),
         }
     }
 }
@@ -69,7 +69,7 @@ impl IntoCpp for RustTrait {
                     .chain(Some(&**output))
                     .map(|x| x.into_cpp())
                     .collect(),
-                is_enum: false,
+                enum_class: None,
             },
         }
     }
@@ -114,7 +114,7 @@ impl IntoCpp for RustType {
             RustType::Boxed(t) => CppType {
                 path: CppPath::from("rust::Box"),
                 generic_args: vec![t.into_cpp()],
-                is_enum: false,
+                enum_class: None,
             },
             RustType::Ref(m, t, _) => CppType {
                 path: match m {
@@ -122,14 +122,14 @@ impl IntoCpp for RustType {
                     Mutability::Not => CppPath::from("rust::Ref"),
                 },
                 generic_args: vec![t.into_cpp()],
-                is_enum: false,
+                enum_class: None,
             },
             RustType::Slice(s) => CppType {
                 path: CppPath::from("rust::Slice"),
                 generic_args: vec![s.into_cpp()],
-                is_enum: false,
+                enum_class: None,
             },
-            RustType::Raw(_, ty) => todo!("{:?}", ty),
+            RustType::Raw(m, ty) => todo!("{:?}", ty),
             RustType::Enum(e) => e.into_cpp(),
             RustType::Adt(pg) => pg.into_cpp(),
             RustType::Tuple(v) => {
@@ -139,7 +139,7 @@ impl IntoCpp for RustType {
                 CppType {
                     path: CppPath::from("rust::Tuple"),
                     generic_args: v.into_iter().map(|x| x.into_cpp()).collect(),
-                    is_enum: false,
+                    enum_class: None,
                 }
             }
             RustType::Dyn(tr, marker_bounds) => {
@@ -154,7 +154,7 @@ impl IntoCpp for RustType {
                                 .map(|x| CppType::from(&*format!("rust::{x}"))),
                         )
                         .collect(),
-                    is_enum: false,
+                    enum_class: None,
                 }
             }
         }

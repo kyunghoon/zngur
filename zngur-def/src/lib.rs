@@ -161,6 +161,7 @@ pub enum RustType {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RustEnum {
     pub path: Vec<String>,
+    pub wrapped: bool,
 }
 
 impl Display for RustEnum {

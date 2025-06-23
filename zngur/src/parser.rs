@@ -3,6 +3,7 @@ use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use syn::{parse_quote, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Block, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod, ItemStatic, ItemStruct, ItemTrait, ItemTraitAlias, ItemType, ItemUnion, ItemUse, Lit, LitStr, Meta, MetaList, Pat, PatType, Path, PathArguments, PathSegment, ReturnType, Signature, Token, TraitItemFn, Type, TypePath, Visibility};
+use zngur_generator::cpp::EnumClass;
 use crate::{cppjinjawriter::{CppJinjaWriter, CppMethod, CppMethodModifier, CppMethodVisibility}, instantiate::Instantiatable, types::{map_type_paths, TypeEnv, TypeEnvBuilder}, CppWriter};
 use super::{Result, Error, types};
 
@@ -446,7 +447,7 @@ struct ParseState {
     /// maps rust types to cpp types declared in `cpp_ref` and `cpp_value`
     type_mappings: HashMap<String, String>,
     /// keeps track of enums types
-    enum_types: HashSet<String>,
+    enum_types: HashMap<String, EnumClass>,
 }
 impl ParseState {
     fn fully_qualify_path(&self, mut p: Path, lts: Option<&HashSet<Ident>>) -> Path {
@@ -821,6 +822,12 @@ impl ParseState {
         Ok(Some(item))
     }
     fn parse_enum(&mut self, zng_writer: &mut ZngWriter, mut item_enum: ItemEnum, is_crate: bool) -> Result<Option<ItemEnum>> {
+        let mut wrapped = false;
+        item_enum.attrs = item_enum.attrs.into_iter().filter_map(|attr| {
+            if !attr.meta.path().is_ident("wrapped") { return Some(attr); }
+            if !wrapped { wrapped = true; }
+            None
+        }).collect();
         let (attrs, transfer_type, _) = extract_transfer_type_from_attributes(item_enum.attrs)?;
         item_enum.attrs = attrs;
 
@@ -832,7 +839,8 @@ impl ParseState {
             if num_generics == 0 {
                 if is_crate {
                     item_enum.attrs.push(parse_quote! { #[repr(u32)] });
-                    zng_writer.wl(format!("enum {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
+                    let wrapped_str = if wrapped { " wrapped" } else { "" };
+                    zng_writer.wl(format!("enum{wrapped_str} {} {{ {} }}", item_enum.ident, item_enum.variants.to_token_stream().to_string()).into());
                 } else {
                     let real_modpath = self.cratepath(true);
                     write_enum(&item_enum, None, real_modpath.as_ref(), real_modpath.as_ref(), &key.as_mod_path(), enum_impl, self, zng_writer, None)?;
@@ -1621,7 +1629,7 @@ impl Parser {
         let mut structs_that_bind = HashMap::<Ident, Path>::new();
         let mut impls = HashMap::<ImplKey, ItemImpl>::new();
         let mut type_mappings = HashMap::<String, String>::new();
-        let mut enum_types = HashSet::<String>::new();
+        let mut enum_types = HashMap::<String, EnumClass>::new();
         let tenv_builder = RefCell::new(if self.state.mode == ParseMode::Generate {
             Some(TypeEnvBuilder::new(&*self.state.prelude_types))
         } else { None });
@@ -1648,7 +1656,9 @@ impl Parser {
             },
             &mut |item| {
                 if is_generate_mode {
-                    enum_types.insert(item.ident.to_string());
+                    let wrapped = item.attrs.iter().any(|attr|
+                        attr.meta.path().is_ident("wrapped"));
+                    enum_types.insert(item.ident.to_string(), if wrapped { EnumClass::Wrapped } else { EnumClass::Basic });
                 }
                 tenv_builder.borrow_mut().as_mut().map(|e| e.do_enum(item));
             },

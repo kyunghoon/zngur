@@ -76,6 +76,7 @@ enum ParsedItem<'a> {
     Enum {
         path: ParsedPath<'a>,
         selections: Vec<String>,
+        wrapped: bool,
     },
     Fn(ParsedMethod<'a>),
     ExternCpp(Vec<ParsedExternCppItem<'a>>),
@@ -351,9 +352,9 @@ Use one of `#layout(size = X, align = Y)`, `#heap_allocated` or `#only_by_ref`."
                     },
                 );
             }
-            ParsedItem::Enum { path, selections } => {
+            ParsedItem::Enum { path, selections, wrapped } => {
                 r.types.push(ZngurType {
-                    ty: RustType::Enum(RustEnum { path: path.to_zngur(base) }),
+                    ty: RustType::Enum(RustEnum { path: path.to_zngur(base), wrapped }),
                     layout: LayoutPolicy::StackAllocated { size: 4, align: 4 },
                     methods: vec![],
                     wellknown_traits: vec![ZngurWellknownTrait::Copy],
@@ -620,6 +621,7 @@ enum Token<'a> {
     Ident(&'a str),
     Str(&'a str),
     Number(usize),
+    Wrapped,
 }
 
 impl<'a> Token<'a> {
@@ -638,6 +640,7 @@ impl<'a> Token<'a> {
             "for" => Token::KwFor,
             "extern" => Token::KwExtern,
             "impl" => Token::KwImpl,
+            "wrapped" => Token::Wrapped,
             x => Token::Ident(x),
         }
     }
@@ -682,6 +685,7 @@ impl Display for Token<'_> {
             Token::Ident(i) => write!(f, "{i}"),
             Token::Number(n) => write!(f, "{n}"),
             Token::Str(s) => write!(f, r#""{s}""#),
+            Token::Wrapped => write!(f, "wrapped"),
         }
     }
 }
@@ -1146,7 +1150,8 @@ fn enum_item<'a>(
 ) -> impl Parser<'a, ParserInput<'a>, ParsedItem<'a>, extra::Err<Rich<'a, Token<'a>, Span>>> + Clone
 {
     just(Token::KwEnum)
-        .ignore_then(path())
+        .then(just(Token::Wrapped).or_not())
+        .then(path())
         .then(
             select! { Token::Ident(c) => c.to_owned() }
                 .separated_by(just(Token::Comma))
@@ -1154,7 +1159,7 @@ fn enum_item<'a>(
                 .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
                 .or(empty().to(vec![]))
         )
-        .map(|(path, selections)| ParsedItem::Enum { path, selections })
+        .map(|(((_, wrapped), path), selections)| ParsedItem::Enum { path, selections, wrapped: wrapped.is_some() })
 }
 
 fn fn_item<'a>(

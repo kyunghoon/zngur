@@ -100,10 +100,14 @@ impl Display for CppPath {
 }
 
 #[derive(Debug)]
+pub enum EnumClass { Basic, Wrapped }
+
+
+#[derive(Debug)]
 pub struct CppType {
     pub path: CppPath,
     pub generic_args: Vec<CppType>,
-    pub is_enum: bool,
+    pub enum_class: Option<EnumClass>,
 }
 
 impl CppType {
@@ -111,12 +115,12 @@ impl CppType {
         CppType {
             path: CppPath::from("rust::Ref"),
             generic_args: vec![self],
-            is_enum: false,
+            enum_class: None,
         }
     }
 
     pub fn is_void(&self) -> bool {
-        self.path.is_unit() && self.generic_args.is_empty() && !self.is_enum
+        self.path.is_unit() && self.generic_args.is_empty() && self.enum_class.is_none()
     }
 
     fn emit_specialization_decl(&self, state: &mut State) -> std::fmt::Result {
@@ -202,14 +206,14 @@ impl From<&str> for CppType {
             None => CppType {
                 path: CppPath::from(value),
                 generic_args: vec![],
-                is_enum: false,
+                enum_class: None,
             },
             Some((path, generics)) => {
                 let generics = generics.strip_suffix('>').unwrap();
                 CppType {
                     path: CppPath::from(path),
                     generic_args: split_string(generics).map(|x| CppType::from(&*x)).collect(),
-                    is_enum: false,
+                    enum_class: None,
                 }
             }
         }
@@ -1024,13 +1028,17 @@ namespace rust {{
         }
         self.emit_ref_specialization(state)?;
 
-        if self.ty.is_enum {
+        if let Some(enum_class) = &self.ty.enum_class {
             let to_struct_name = "ToRust";
             let to_method_name = "to";
+            let enum_ty = match enum_class {
+                EnumClass::Basic => format!("{}", self.ty.path.name()),
+                EnumClass::Wrapped => format!("{}::Type", self.ty.path.name()),
+            };
             write!(state, r#"
-template<> struct {to_struct_name}<{ty}::Type> {{
+template<> struct {to_struct_name}<{enum_ty}> {{
     typedef {path} type;
-    static inline {path} {to_method_name}({ty}::Type t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
+    static inline {path} {to_method_name}({enum_ty} t) {{"#, path = self.ty.path)?;
 
             for (n, name) in self.alternates.iter().enumerate() {
                 if self.alternates.len() > 1 {
@@ -1056,8 +1064,8 @@ template<> struct {to_struct_name}<{ty}::Type> {{
     }}
 }};
 template<> struct {from_struct_name}<::rust::Ref<{path}>> {{
-    typedef {ty}::Type type;
-    static inline {ty}::Type {from_method_name}(::rust::Ref<{path}> const& t) {{"#, ty = self.ty.path.name(), path = self.ty.path)?;
+    typedef {enum_ty} type;
+    static inline {enum_ty} {from_method_name}(::rust::Ref<{path}> const& t) {{"#, path = self.ty.path)?;
 
             for (n, name) in self.alternates.iter().enumerate() {
                 if self.alternates.len() > 1 {
@@ -1080,9 +1088,9 @@ template<> struct {from_struct_name}<::rust::Ref<{path}>> {{
     }}
 }};
 template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::Ref<{path}>> {{
-    static inline {ty}::Type {from_method_name}({path} const& t) {{ return {from_struct_name}<rust::Ref<{path}>>::{from_method_name}(t); }}
+    static inline {enum_ty} {from_method_name}({path} const& t) {{ return {from_struct_name}<rust::Ref<{path}>>::{from_method_name}(t); }}
 }};
-"#, ty = self.ty.path.name(), path = self.ty.path)?;
+"#, path = self.ty.path)?;
         }
 
         std::fmt::Result::Ok(())

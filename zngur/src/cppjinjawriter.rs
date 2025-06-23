@@ -1,6 +1,6 @@
-use std::{collections::{HashMap, HashSet}, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 use syn::{GenericArgument, PathArguments, Type, TypePath, TypeReference, TypeSlice};
-use zngur_generator::cpp::sanitize_cpp_keywords;
+use zngur_generator::cpp::{sanitize_cpp_keywords, EnumClass};
 
 use crate::parser::CppJinjaConfig;
 
@@ -32,10 +32,10 @@ pub struct CppJinjaWriter<'a> {
     methods: Vec<CppMethod>,
     config: CppJinjaConfig,
     type_mappings: &'a HashMap<String, String>,
-    enum_types: &'a HashSet<String>,
+    enum_types: &'a HashMap<String, EnumClass>,
 }
 impl<'a> CppJinjaWriter<'a> {
-    pub fn new(templates_path: &std::path::Path, class_name: String, initial_context: &HashMap<String, String>, config: CppJinjaConfig, type_mappings: &'a HashMap<String, String>, enum_types: &'a HashSet<String>) -> Self {
+    pub fn new(templates_path: &std::path::Path, class_name: String, initial_context: &HashMap<String, String>, config: CppJinjaConfig, type_mappings: &'a HashMap<String, String>, enum_types: &'a HashMap<String, EnumClass>) -> Self {
         let mut context = tera::Context::new();
         for (k, v) in initial_context.iter() {
             context.insert(k, v);
@@ -116,8 +116,11 @@ impl<'a> CppJinjaWriter<'a> {
             Type::Path(TypePath { qself: None, path }) if path.is_ident("bool") => "bool".to_string(),
             Type::Path(TypePath { qself: None, path }) if path.get_ident().is_some() => {
                 let typename = path.get_ident().unwrap().to_string();
-                if self.enum_types.contains(&typename) {
-                    format!("{typename}::Type")
+                if let Some(enum_class) = self.enum_types.get(&typename) {
+                    match enum_class {
+                        EnumClass::Basic => typename,
+                        EnumClass::Wrapped => format!("{typename}::Type")
+                    }
                 } else {
                     self.type_mappings.get(&typename).cloned().unwrap_or(typename)
                 }
