@@ -1462,11 +1462,17 @@ template<typename T> struct _MISSING_FROM_RUST_CONVERSION_TYPE_;
 template<typename T> struct ToRust { static_assert(sizeof(_MISSING_TO_RUST_CONVERSION_TYPE_<T>) == -1, "ToRust"); };
 template<typename T> struct FromRust { static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "FromRust"); };
 "#;
+
         state.text += r#"
 #define PTR_TAG_MASK 0x1UL
 #define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
 #define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
 #define PTR_TAG_CLEAR(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
+#define IS_PROBABLY_BOGUS_POINTER(p) ( \
+    (p) == NULL ||                     \
+    (uintptr_t)(p) < 0x1000 ||                           /* very low addresses */ \
+    (uintptr_t)(p) > (uintptr_t)0x0000FFFFFFFFFFFFUL     /* >48-bit canonical range on x64 */ \
+)
 
 template<typename T> struct __zngur__to_rust { static_assert(sizeof(_MISSING_TO_RUST_CONVERSION_TYPE_<T>) == -1, "to_rust"); };
 template<typename T> struct __zngur__from_rust { static_assert(sizeof(_MISSING_FROM_RUST_CONVERSION_TYPE_<T>) == -1, "from_rust"); };
@@ -1498,7 +1504,7 @@ namespace rust {
             return o;
         }
         void mark_owned() { data = PTR_TAG_SET(data, true); }
-        bool is_owned() const { return PTR_TAG_GET(data); }
+        bool is_owned() const { return PTR_TAG_GET(data) && !IS_PROBABLY_BOGUS_POINTER(PTR_TAG_CLEAR(data)) && !IS_PROBABLY_BOGUS_POINTER(destructor); }
         template<typename T> inline T& as_cpp() { return *reinterpret_cast<T*>(PTR_TAG_CLEAR(data)); }
         template<typename T> inline T const& as_cpp() const { return *reinterpret_cast<T const*>(PTR_TAG_CLEAR(data)); }
     };
