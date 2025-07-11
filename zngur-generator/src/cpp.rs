@@ -1464,10 +1464,63 @@ template<typename T> struct FromRust { static_assert(sizeof(_MISSING_FROM_RUST_C
 "#;
 
         state.text += r#"
-#define PTR_TAG_MASK 0x1UL
-#define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
-#define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
-#define PTR_TAG_CLEAR(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
+#ifdef _WIN32
+#  include <unordered_map>
+#  include <mutex>
+#  include <optional>
+#  include <cstdint>
+class TagMap {
+public:
+    static TagMap& instance() {
+        static TagMap instance;
+        return instance;
+    }
+
+    void insert(uintptr_t key, bool value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        map_[key] = value;
+    }
+
+    std::optional<bool> get(uintptr_t key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+
+    void erase(uintptr_t key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        map_.erase(key);
+    }
+
+    bool contains(uintptr_t key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return map_.find(key) != map_.end();
+    }
+
+private:
+    TagMap() = default;
+    ~TagMap() = default;
+    TagMap(const TagMap&) = delete;
+    TagMap& operator=(const TagMap&) = delete;
+
+    mutable std::mutex mutex_;
+    std::unordered_map<uintptr_t, bool> map_;
+};
+inline uint8_t* __tag_set__(uint8_t* p, bool flag) { TagMap::instance().insert(reinterpret_cast<uintptr_t>(p), (flag)); return p; }
+inline uint8_t* __tag_clear__(uint8_t* p) { TagMap::instance().erase(reinterpret_cast<uintptr_t>(p)); return p; }
+#  define PTR_TAG_SET(p, flag) __tag_set__(p, flag)
+#  define PTR_TAG_GET(p) TagMap::instance().get(reinterpret_cast<uintptr_t>(p)).value_or(false)
+#  define PTR_TAG_CLEAR(p) __tag_clear__(p)
+#else // _WIN32
+#  define PTR_TAG_MASK 0x1UL
+#  define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
+#  define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
+#  define PTR_TAG_CLEAR(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
+#endif // _WIN32
+
 #define IS_PROBABLY_BOGUS_POINTER(p) ( \
     (p) == NULL ||                     \
     (uintptr_t)(p) < 0x1000 ||                           /* very low addresses */ \
