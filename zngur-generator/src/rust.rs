@@ -129,7 +129,7 @@ impl IntoCpp for RustType {
                 generic_args: vec![s.into_cpp()],
                 enum_class: None,
             },
-            RustType::Raw(m, ty) => todo!("{:?}", ty),
+            RustType::Raw(_m, ty) => todo!("{:?}", ty),
             RustType::Enum(e) => e.into_cpp(),
             RustType::Adt(pg) => pg.into_cpp(),
             RustType::Tuple(v) => {

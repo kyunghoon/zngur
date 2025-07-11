@@ -1528,7 +1528,6 @@ impl ParseState {
                                     FnArg::Receiver(_) => None,
                                     FnArg::Typed(pat_type) => Some(&pat_type.pat),
                                 }).collect::<Punctuated<_, Token![,]>>();
-                                let x = ident.to_string().to_snake_case();
                                 impl_fn.block = parse_quote!({ self.0.#ident(#inputs) });
                                 impl_fn.sig = to_guarded_signature(impl_fn.sig, self.mode);
                                 Ok(Some(ImplItem::Fn(impl_fn)))
