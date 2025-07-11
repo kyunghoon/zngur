@@ -1502,14 +1502,13 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<uintptr_t, bool> map_;
 };
-inline uint8_t* __tag_set__(uint8_t* p, bool flag) { TagMap::instance().insert(reinterpret_cast<uintptr_t>(p), (flag)); return p; }
-#  define PTR_TAG_SET(p, flag) __tag_set__(p, flag)
+inline uint8_t* __tag_set__(uint8_t* p) { TagMap::instance().insert(reinterpret_cast<uintptr_t>(p), true); return p; }
+#  define PTR_TAG_SET(p) __tag_set__(p)
 #  define PTR_TAG_UNSET(p) p
 #  define PTR_TAG_CLEAR(p) TagMap::instance().erase(reinterpret_cast<uintptr_t>(p))
 #  define PTR_TAG_GET(p) TagMap::instance().get(reinterpret_cast<uintptr_t>(p)).value_or(false)
 #else // _WIN32
-#  define PTR_TAG_MASK 0x1UL
-#  define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
+#  define PTR_TAG_SET(p) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | 0x1UL))
 #  define PTR_TAG_UNSET(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
 #  define PTR_TAG_CLEAR(p)
 #  define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
@@ -1553,7 +1552,7 @@ namespace rust {
             };
             return o;
         }
-        void mark_owned() { data = PTR_TAG_SET(data, true); }
+        void mark_owned() { data = PTR_TAG_SET(data); }
         bool is_owned() const { return PTR_TAG_GET(data) && !IS_PROBABLY_BOGUS_POINTER(PTR_TAG_UNSET(data)) && !IS_PROBABLY_BOGUS_POINTER(destructor); }
         template<typename T> inline T& as_cpp() { return *reinterpret_cast<T*>(PTR_TAG_UNSET(data)); }
         template<typename T> inline T const& as_cpp() const { return *reinterpret_cast<T const*>(PTR_TAG_UNSET(data)); }
