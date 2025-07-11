@@ -1475,50 +1475,44 @@ public:
         static TagMap instance;
         return instance;
     }
-
     void insert(uintptr_t key, bool value) {
         std::lock_guard<std::mutex> lock(mutex_);
         map_[key] = value;
     }
-
     std::optional<bool> get(uintptr_t key) const {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = map_.find(key);
-        if (it != map_.end()) {
+        if (it != map_.end())
             return it->second;
-        }
         return std::nullopt;
     }
-
     void erase(uintptr_t key) {
         std::lock_guard<std::mutex> lock(mutex_);
         map_.erase(key);
     }
-
     bool contains(uintptr_t key) const {
         std::lock_guard<std::mutex> lock(mutex_);
         return map_.find(key) != map_.end();
     }
-
 private:
     TagMap() = default;
     ~TagMap() = default;
     TagMap(const TagMap&) = delete;
     TagMap& operator=(const TagMap&) = delete;
-
     mutable std::mutex mutex_;
     std::unordered_map<uintptr_t, bool> map_;
 };
 inline uint8_t* __tag_set__(uint8_t* p, bool flag) { TagMap::instance().insert(reinterpret_cast<uintptr_t>(p), (flag)); return p; }
-inline uint8_t* __tag_clear__(uint8_t* p) { TagMap::instance().erase(reinterpret_cast<uintptr_t>(p)); return p; }
 #  define PTR_TAG_SET(p, flag) __tag_set__(p, flag)
+#  define PTR_TAG_UNSET(p) p
+#  define PTR_TAG_CLEAR(p) TagMap::instance().erase(reinterpret_cast<uintptr_t>(p))
 #  define PTR_TAG_GET(p) TagMap::instance().get(reinterpret_cast<uintptr_t>(p)).value_or(false)
-#  define PTR_TAG_CLEAR(p) __tag_clear__(p)
 #else // _WIN32
 #  define PTR_TAG_MASK 0x1UL
 #  define PTR_TAG_SET(p, flag) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | ((flag) ? PTR_TAG_MASK : 0)))
+#  define PTR_TAG_UNSET(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
+#  define PTR_TAG_CLEAR(p)
 #  define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
-#  define PTR_TAG_CLEAR(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
 #endif // _WIN32
 
 #define IS_PROBABLY_BOGUS_POINTER(p) ( \
@@ -1553,13 +1547,16 @@ namespace rust {
         template<typename T, typename... Args> inline static ZngurCppOpaqueOwnedObject build(Args&&... args) {
             ZngurCppOpaqueOwnedObject o;
             o.data = reinterpret_cast<uint8_t*>(new T(::std::forward<Args>(args)...));
-            o.destructor = [](uint8_t* d) { delete reinterpret_cast<T*>(PTR_TAG_CLEAR(d)); };
+            o.destructor = [](uint8_t* d) {
+                PTR_TAG_CLEAR(d);
+                delete reinterpret_cast<T*>(PTR_TAG_UNSET(d));
+            };
             return o;
         }
         void mark_owned() { data = PTR_TAG_SET(data, true); }
-        bool is_owned() const { return PTR_TAG_GET(data) && !IS_PROBABLY_BOGUS_POINTER(PTR_TAG_CLEAR(data)) && !IS_PROBABLY_BOGUS_POINTER(destructor); }
-        template<typename T> inline T& as_cpp() { return *reinterpret_cast<T*>(PTR_TAG_CLEAR(data)); }
-        template<typename T> inline T const& as_cpp() const { return *reinterpret_cast<T const*>(PTR_TAG_CLEAR(data)); }
+        bool is_owned() const { return PTR_TAG_GET(data) && !IS_PROBABLY_BOGUS_POINTER(PTR_TAG_UNSET(data)) && !IS_PROBABLY_BOGUS_POINTER(destructor); }
+        template<typename T> inline T& as_cpp() { return *reinterpret_cast<T*>(PTR_TAG_UNSET(data)); }
+        template<typename T> inline T const& as_cpp() const { return *reinterpret_cast<T const*>(PTR_TAG_UNSET(data)); }
     };
 "#;
         state.text += r#"
