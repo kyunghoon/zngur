@@ -1508,7 +1508,8 @@ inline uint8_t* __tag_set__(uint8_t* p) { TagMap::instance().insert(reinterpret_
 #  define PTR_TAG_CLEAR(p) TagMap::instance().erase(reinterpret_cast<uintptr_t>(p))
 #  define PTR_TAG_GET(p) TagMap::instance().get(reinterpret_cast<uintptr_t>(p)).value_or(false)
 #else // _WIN32
-#  define PTR_TAG_SET(p) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | 0x1UL))
+#  define PTR_TAG_MASK 0x1UL
+#  define PTR_TAG_SET(p) (reinterpret_cast<decltype(p)>((reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK) | PTR_TAG_MASK))
 #  define PTR_TAG_UNSET(p) (reinterpret_cast<decltype(p)>(reinterpret_cast<uintptr_t>(p) & ~PTR_TAG_MASK))
 #  define PTR_TAG_CLEAR(p)
 #  define PTR_TAG_GET(p) ((reinterpret_cast<uintptr_t>(p) & PTR_TAG_MASK) != 0)
