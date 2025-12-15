@@ -16,7 +16,7 @@ fn main() {
         .with_cpp_file(out_dir.join("generated.cpp"))
         .with_h_file(out_dir.join("generated.h"))
         .with_rs_file(out_dir.join("generated.rs"))
-        .generate(Some("Demo"));
+        .generate(Some("Demo"), Some("DemoC"));
 
     let my_build = &mut cc::Build::new();
     let my_build = my_build

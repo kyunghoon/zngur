@@ -36,7 +36,7 @@ impl ZngurGenerator {
         ZngurGenerator(zng)
     }
 
-    pub fn render(self, entry_point: Option<&str>) -> (String, String, Option<String>) {
+    pub fn render(self, rs_entrypoint: Option<&str>, c_entrypoint: Option<&str>) -> (String, String, Option<String>) {
         let zng = self.0;
 
         let owned_types = zng.types.iter().filter_map(|ty_def| match &ty_def.ty {
@@ -46,7 +46,7 @@ impl ZngurGenerator {
 
         let mut cpp_file = CppFile::default();
         cpp_file.additional_includes = zng.additional_includes;
-        let mut rust_file = RustFile::new(entry_point);
+        let mut rust_file = RustFile::new(rs_entrypoint, c_entrypoint);
         cpp_file.trait_defs = zng
             .traits
             .iter()
@@ -265,11 +265,11 @@ impl ZngurGenerator {
         }
 
         #[cfg(feature="hotreload")]
-        if let Some(entry_point) = entry_point {
-            rust_file.add_hotload_api(entry_point, &cpp_file);
+        if let Some(rs_entrypoint) = rs_entrypoint {
+            rust_file.add_hotload_api(rs_entrypoint, &cpp_file);
         }
 
-        let (h, cpp) = cpp_file.render(entry_point);
+        let (h, cpp) = cpp_file.render(rs_entrypoint, c_entrypoint);
         (rust_file.text, h, cpp)
     }
 }

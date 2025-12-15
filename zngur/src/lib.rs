@@ -71,12 +71,12 @@ impl Zngur {
         self
     }
 
-    pub fn generate(self, entry_point: Option<&str>) {
+    pub fn generate(self, rs_entrypoint: Option<&str>, c_entrypoint: Option<&str>) {
         let path = self.zng_file;
         let file = std::fs::read_to_string(path).unwrap();
         let file = ZngurGenerator::build_from_zng(ParsedZngFile::parse("main.zng", &file));
 
-        let (rust, h, cpp) = file.render(entry_point);
+        let (rust, h, cpp) = file.render(rs_entrypoint, c_entrypoint);
         if let Some(rs_file_path) = self.rs_file_path {
             File::create(rs_file_path)
                 .unwrap()

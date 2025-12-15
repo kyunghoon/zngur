@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::HashSet, fmt::Write};
 use itertools::Itertools;
 
 use crate::{
-    ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData, cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType, EnumClass, HotReload}
+    ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData, cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType, EnumClass, EntryPoints}
 };
 
 use zngur_def::*;
@@ -161,7 +161,8 @@ impl IntoCpp for RustType {
 }
 
 pub struct RustFile {
-    pub hotreload: Option<String>,
+    pub rs_entrypoint: Option<String>,
+    pub c_entrypoint: Option<String>,
     pub text: String,
     pub panic_to_exception: bool,
     ind: usize,
@@ -171,17 +172,16 @@ impl RustFile {
     fn indent_inc(&mut self) { self.ind += 1; }
     fn indent_dec(&mut self) { self.ind -= 1; }
 }
-impl HotReload for RustFile {
-    #[cfg(feature="hotreload")]
-    fn hotreload(&self) -> Option<&str> { self.hotreload.as_ref().map(|s| s.as_str()) }
-    #[cfg(not(feature="hotreload"))]
-    fn hotreload(&self) -> Option<&str> { None }
+impl EntryPoints for RustFile {
+    fn rs_entrypoint(&self) -> Option<&str> { self.rs_entrypoint.as_ref().map(|s| s.as_str()) }
+    fn c_entrypoint(&self) -> Option<&str> { self.c_entrypoint.as_ref().map(|s| s.as_str()) }
 }
 impl RustFile {
-    pub fn new(entry_point: Option<&str>) -> Self {
+    pub fn new(rs_entrypoint: Option<&str>, c_entrypoint: Option<&str>) -> Self {
         Self {
             ind: 0,
-            hotreload: entry_point.map(|s| s.to_owned()),
+            rs_entrypoint: rs_entrypoint.map(|s| s.to_owned()),
+            c_entrypoint: c_entrypoint.map(|s| s.to_owned()),
             text: [
 r#"mod internal {
     use std::ops::{Deref, DerefMut};
@@ -359,11 +359,11 @@ impl RustFile {
         w!(self, "\n{ind}let mut r = ::core::mem::MaybeUninit::uninit();");
         w!(self, "\n{ind}");
         let is_call = name == "call";
-        if self.hotreload.is_some() && !is_call {
+        if self.rs_entrypoint.is_some() && !is_call {
             w!(self, "(GetZngurCApi().");
         }
         w!(self, "{name}");
-        if self.hotreload.is_some() && !is_call {
+        if self.rs_entrypoint.is_some() && !is_call {
             w!(self, ")");
         }
         w!(self, "(");
@@ -635,7 +635,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         lifetimes: &[String],
         owned_types: &HashSet<Vec<String>>,
     ) -> Vec<String> {
-        let mangled_names = if self.hotreload.is_some() {
+        let mangled_names = if self.rs_entrypoint.is_some() {
             let mut mangled_names = vec![];
             for method in methods {
                 let mn = mangle_name(&format!("{}_extern_method_{}", owner, method.name));
@@ -772,8 +772,8 @@ pub(crate) fn {rust_name}("#
         use_path: Option<Vec<String>>,
         deref: bool,
     ) -> String {
-        let mangle = if self.hotreload.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
-        let public = if self.hotreload.is_some() { "" } else { "pub " };
+        let mangle = if self.rs_entrypoint.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
+        let public = if self.rs_entrypoint.is_some() { "" } else { "pub " };
         let mut mangled_name = mangle_name(rust_name);
         if deref {
             mangled_name += "_deref_";
@@ -863,8 +863,8 @@ pub(crate) fn {rust_name}("#
         ty: &RustType,
         wellknown_trait: ZngurWellknownTrait,
     ) -> ZngurWellknownTraitData {
-        let mangle = if self.hotreload.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
-        let public = if self.hotreload.is_some() { "" } else { "pub " };
+        let mangle = if self.rs_entrypoint.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
+        let public = if self.rs_entrypoint.is_some() { "" } else { "pub " };
         match wellknown_trait {
             ZngurWellknownTrait::Unsized => ZngurWellknownTraitData::Unsized,
             ZngurWellknownTrait::Copy => ZngurWellknownTraitData::Copy,
