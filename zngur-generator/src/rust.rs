@@ -3,8 +3,7 @@ use std::{borrow::Cow, collections::HashSet, fmt::Write};
 use itertools::Itertools;
 
 use crate::{
-    cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType, EnumClass},
-    ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData,
+    ZngurTrait, ZngurWellknownTrait, ZngurWellknownTraitData, cpp::{CppLayoutPolicy, CppPath, CppTraitDefinition, CppTraitMethod, CppType, EnumClass, HotReload}
 };
 
 use zngur_def::*;
@@ -162,7 +161,7 @@ impl IntoCpp for RustType {
 }
 
 pub struct RustFile {
-    pub hotreload: bool,
+    pub hotreload: Option<String>,
     pub text: String,
     pub panic_to_exception: bool,
     ind: usize,
@@ -172,16 +171,17 @@ impl RustFile {
     fn indent_inc(&mut self) { self.ind += 1; }
     fn indent_dec(&mut self) { self.ind -= 1; }
 }
-impl Default for RustFile {
-    fn default() -> Self {
-        #[cfg(feature="hotreload")]
-        let hotreload = true;
-        #[cfg(not(feature="hotreload"))]
-        let hotreload = false;
-
+impl HotReload for RustFile {
+    #[cfg(feature="hotreload")]
+    fn hotreload(&self) -> Option<&str> { self.hotreload.as_ref().map(|s| s.as_str()) }
+    #[cfg(not(feature="hotreload"))]
+    fn hotreload(&self) -> Option<&str> { None }
+}
+impl RustFile {
+    pub fn new(entry_point: Option<&str>) -> Self {
         Self {
             ind: 0,
-            hotreload,
+            hotreload: entry_point.map(|s| s.to_owned()),
             text: [
 r#"mod internal {
     use std::ops::{Deref, DerefMut};
@@ -359,11 +359,11 @@ impl RustFile {
         w!(self, "\n{ind}let mut r = ::core::mem::MaybeUninit::uninit();");
         w!(self, "\n{ind}");
         let is_call = name == "call";
-        if self.hotreload && !is_call {
+        if self.hotreload.is_some() && !is_call {
             w!(self, "(GetZngurCApi().");
         }
         w!(self, "{name}");
-        if self.hotreload && !is_call {
+        if self.hotreload.is_some() && !is_call {
             w!(self, ")");
         }
         w!(self, "(");
@@ -635,7 +635,7 @@ const _: [(); {align}] = [(); ::std::mem::align_of::<{ty}>()];"#);
         lifetimes: &[String],
         owned_types: &HashSet<Vec<String>>,
     ) -> Vec<String> {
-        let mangled_names = if self.hotreload {
+        let mangled_names = if self.hotreload.is_some() {
             let mut mangled_names = vec![];
             for method in methods {
                 let mn = mangle_name(&format!("{}_extern_method_{}", owner, method.name));
@@ -772,8 +772,8 @@ pub(crate) fn {rust_name}("#
         use_path: Option<Vec<String>>,
         deref: bool,
     ) -> String {
-        let mangle = if self.hotreload { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
-        let public = if self.hotreload { "" } else { "pub " };
+        let mangle = if self.hotreload.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
+        let public = if self.hotreload.is_some() { "" } else { "pub " };
         let mut mangled_name = mangle_name(rust_name);
         if deref {
             mangled_name += "_deref_";
@@ -863,8 +863,8 @@ pub(crate) fn {rust_name}("#
         ty: &RustType,
         wellknown_trait: ZngurWellknownTrait,
     ) -> ZngurWellknownTraitData {
-        let mangle = if self.hotreload { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
-        let public = if self.hotreload { "" } else { "pub " };
+        let mangle = if self.hotreload.is_some() { Cow::Borrowed("") } else { Cow::Owned(NO_MANGLE.to_string() + "\n") };
+        let public = if self.hotreload.is_some() { "" } else { "pub " };
         match wellknown_trait {
             ZngurWellknownTrait::Unsized => ZngurWellknownTraitData::Unsized,
             ZngurWellknownTrait::Copy => ZngurWellknownTraitData::Copy,
@@ -948,7 +948,7 @@ thread_local! {{
     }
 
     #[cfg(feature="hotreload")]
-    pub fn add_hotload_api(&mut self, cpp_file: &crate::CppFile) {
+    pub fn add_hotload_api(&mut self, entry_point: &str, cpp_file: &crate::CppFile) {
         use crate::cpp::EmitMode;
 
         w!(self, r#"
@@ -1017,7 +1017,7 @@ thread_local! {{
 }}
 static CAPI: std::sync::OnceLock<ZngurCApi> = std::sync::OnceLock::new();
 #[allow(dead_code)] #[allow(non_snake_case)] fn GetZngurCApi() -> &'static ZngurCApi {{ CAPI.get().expect("zngur capi not initialized") }}
-#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn GetZngurRsApi(capi: ZngurCApi) -> ZngurRsApi {{
+#[allow(non_snake_case)] {NO_MANGLE} pub extern "C" fn {entry_point}(capi: ZngurCApi) -> ZngurRsApi {{
     CAPI.get_or_init(|| capi);
     ZngurRsApi {{"#);
         if cpp_file.fn_defs.is_empty() && cpp_file.type_defs.is_empty() && cpp_file.trait_defs.is_empty() {

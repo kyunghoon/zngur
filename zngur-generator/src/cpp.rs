@@ -223,7 +223,7 @@ impl From<&str> for CppType {
 pub struct State {
     text: String,
     panic_to_exception: bool,
-    hotreload: bool,
+    hotreload: Option<String>,
     indent_count: usize,
     disable_ending_newline: bool,
 }
@@ -262,25 +262,34 @@ pub struct CppTraitMethod {
     pub output: CppType,
 }
 
-pub enum EmitMode<'a, W> where W: Write {
-    Cpp(&'a mut W, bool),
-    Rust(&'a mut W),
-    RustLinkNameOnly(&'a mut W),
+pub trait HotReload {
+    fn hotreload(&self) -> Option<&str>;
 }
-impl<'a, W> EmitMode<'a, W> where W: Write {
-    pub fn hotreload(&self) -> bool {
+
+impl HotReload for State {
+    fn hotreload(&self) -> Option<&str> {
+        self.hotreload.as_ref().map(|s| s.as_str())
+    }
+}
+
+impl<'a, W> Write for EmitMode<'a, W> where W: Write + HotReload {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
         match self {
-            EmitMode::Cpp(_, hotreload) => *hotreload,
-            _ => true,
+            EmitMode::Cpp(m) | EmitMode::Rust(m) | EmitMode::RustLinkNameOnly(m) => write!(m, "{s}")
         }
     }
 }
-impl<'a, W> Write for EmitMode<'a, W> where W: Write {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+
+pub enum EmitMode<'a, W> where W: Write + HotReload {
+    Cpp(&'a mut W),
+    Rust(&'a mut W),
+    RustLinkNameOnly(&'a mut W),
+}
+
+impl<'a, W> HotReload for EmitMode<'a, W> where W: Write + HotReload {
+    fn hotreload(&self) -> Option<&str> {
         match self {
-            EmitMode::Cpp(m, _) |
-            EmitMode::Rust(m) |
-            EmitMode::RustLinkNameOnly(m) => write!(m, "{s}"),
+            EmitMode::Cpp(w) | EmitMode::Rust(w) | EmitMode::RustLinkNameOnly(w) => w.hotreload()
         }
     }
 }
@@ -293,9 +302,9 @@ pub struct CppFnSig {
 }
 
 impl CppFnSig {
-    fn emit_params(&self, state: &mut EmitMode<impl Write>) -> std::fmt::Result {
+    fn emit_params(&self, state: &mut EmitMode<impl Write + HotReload>) -> std::fmt::Result {
         match state {
-            EmitMode::Cpp(state, _) => {
+            EmitMode::Cpp(state) => {
                 for n in 0..self.inputs.len() {
                     write!(state, "uint8_t* i{n}, ")?;
                 }
@@ -307,19 +316,19 @@ impl CppFnSig {
                 }
                 write!(state, "o: *mut u8")?;
             }
-            EmitMode::RustLinkNameOnly(_) => (),
+            EmitMode::RustLinkNameOnly(..) => (),
         }
         Ok(())
     }
-    fn emit_link(&self, state: &mut EmitMode<impl Write>, is_rust_link_decl: bool) -> std::fmt::Result {
+    fn emit_link(&self, state: &mut EmitMode<impl Write + HotReload>, is_rust_link_decl: bool) -> std::fmt::Result {
         match state {
-            EmitMode::Cpp(state, hotreload) => {
-                if *hotreload && is_rust_link_decl {
+            EmitMode::Cpp(state) => {
+                if state.hotreload().is_some() && is_rust_link_decl {
                     write!(state, "    void (*{})(", self.rust_link_name)?;
                 } else {
                     write!(state, "void {}(", self.rust_link_name)?;
                 }
-                self.emit_params(&mut EmitMode::Cpp(*state, *hotreload))?;
+                self.emit_params(&mut EmitMode::Cpp(*state))?;
                 write!(state, ")")?;
             }
             EmitMode::Rust(state) => {
@@ -333,12 +342,12 @@ impl CppFnSig {
         }
         Ok(())
     }
-    pub fn emit_link_decl(&self, state: &mut EmitMode<impl Write>) -> std::fmt::Result {
+    pub fn emit_link_decl(&self, state: &mut EmitMode<impl Write + HotReload>) -> std::fmt::Result {
         self.emit_link(state, true)?;
         match state {
             EmitMode::Cpp(..) => writeln!(state, ";"),
-            EmitMode::Rust(_) => write!(state, ","),
-            EmitMode::RustLinkNameOnly(_) => write!(state, ","),
+            EmitMode::Rust(..) => write!(state, ","),
+            EmitMode::RustLinkNameOnly(..) => write!(state, ","),
         }
     }
 
@@ -360,7 +369,7 @@ impl CppFnSig {
     }
 
     fn emit_cpp_def(&self, state: &mut State, fn_name: &str) -> std::fmt::Result {
-        let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+        let api = if let Some(entry_point) = &state.hotreload { format!("{}().", entry_point) } else { "".to_owned() };
         let ii = state.indent();
         let CppFnSig {
             inputs,
@@ -437,7 +446,7 @@ pub enum CppTraitDefinition {
 }
 
 impl CppTraitDefinition {
-    pub fn emit_links(&self, state: &mut EmitMode<impl Write>) -> std::fmt::Result {
+    pub fn emit_links(&self, state: &mut EmitMode<impl Write + HotReload>) -> std::fmt::Result {
         match self {
             CppTraitDefinition::Fn {
                 sig:
@@ -448,8 +457,8 @@ impl CppTraitDefinition {
                     },
             } => {
                 match state {
-                    EmitMode::Cpp(_, hotreload) => {
-                        if *hotreload {
+                    EmitMode::Cpp(_) => {
+                        if state.hotreload().is_some() {
                             writeln!(state, "    void (*{rust_link_name})(uint8_t* data, void(*destructor)(uint8_t *), void(*call)(uint8_t *, {} uint8_t *), uint8_t* o);",
                                 (0..inputs.len()).map(|_| "uint8_t *, ").join(" "))?;
                         } else {
@@ -457,10 +466,10 @@ impl CppTraitDefinition {
                                 (0..inputs.len()).map(|_| "uint8_t *, ").join(" "))?;
                         }
                     }
-                    EmitMode::Rust(_) =>
+                    EmitMode::Rust(..) =>
                         write!(state, "\n    pub {rust_link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(usize), call: extern \"C\" fn(*mut u8, {} *mut u8), o: *mut u8),",
                             (0..inputs.len()).map(|_| "*mut u8, ").join(" "))?,
-                    EmitMode::RustLinkNameOnly(_) => write!(state, "\n        {rust_link_name},")?,
+                    EmitMode::RustLinkNameOnly(..) => write!(state, "\n        {rust_link_name},")?,
                 }
             }
             CppTraitDefinition::Normal {
@@ -469,8 +478,8 @@ impl CppTraitDefinition {
                 ..
             } => {
                 match state {
-                    EmitMode::Cpp(_, hotreload) => {
-                        if *hotreload {
+                    EmitMode::Cpp(_) => {
+                        if state.hotreload().is_some() {
                             writeln!(state, "    void (*{link_name})(uint8_t *data, void destructor(uint8_t *), uint8_t *o);")?;
                             writeln!(state, "    void (*{link_name_ref})(uint8_t *data, uint8_t *o);")?;
                         } else {
@@ -478,11 +487,11 @@ impl CppTraitDefinition {
                             writeln!(state, "void {link_name_ref}(uint8_t *data, uint8_t *o);")?;
                         }
                     }
-                    EmitMode::Rust(_) => {
+                    EmitMode::Rust(..) => {
                         write!(state, "\n    pub {link_name}: extern \"C\" fn(data: *mut u8, destructor: extern \"C\" fn(usize), o: *mut u8),")?;
                         write!(state, "\n    pub {link_name_ref}: extern \"C\" fn(data: *mut u8, o: *mut u8),")?;
                     }
-                    EmitMode::RustLinkNameOnly(_) => {
+                    EmitMode::RustLinkNameOnly(..) => {
                         write!(state, "\n        {link_name},")?;
                         write!(state, "\n        {link_name_ref},")?;
                     },
@@ -881,7 +890,7 @@ namespace rust {{
                             ty = self.ty.path.name(),
                         )?;
                     } else {
-                        let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+                        let api = if let Some(entry_point) = &state.hotreload { format!("{}().", entry_point) } else { "".to_owned() };
                         let drop_in_place = self
                             .wellknown_traits
                             .iter()
@@ -937,7 +946,7 @@ namespace rust {{
                 }
             }
             if let Some((rust_link_name, cpp_ty)) = &self.cpp_value {
-                let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+                let api = if let Some(entry_point) = &state.hotreload { format!("{}().", entry_point) } else { "".to_owned() };
                 write!(state, r#"
         inline {cpp_ty}& cpp() {{ return (*{api}{rust_link_name}(&data[0])).as_cpp<{cpp_ty}>(); }}"#)?;
                 write!(state, r#"
@@ -1106,7 +1115,7 @@ template<> struct {from_struct_name}<{path}> : public {from_struct_name}<rust::R
             .contains(&ZngurWellknownTraitData::Unsized);
         let cpp_type = &self.ty.to_string();
         let my_name = cpp_type.strip_prefix("::").unwrap();
-        let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+        let api = if let Some(entry_point) = &state.hotreload { format!("{}().", entry_point) } else { "".to_owned() };
         for c in &self.constructors {
             let is_owned_obj = c.inputs.iter().next().map(|ty| &ty.path.0 == &["rust", "ZngurCppOpaqueOwnedObject"]).unwrap_or_default();
             let fn_name = my_name.to_owned() + "::" + self.ty.path.0.last().unwrap();
@@ -1292,7 +1301,7 @@ rust::{ref_kind}<{my_name}>::{ref_kind}({as_ty}& args) {{
                 )?;
             }
         }
-        let api = if state.hotreload { "GetZngurRsApi()." } else { "" };
+        let api = if let Some(entry_point) = &state.hotreload { format!("{}().", entry_point) } else { "".to_owned() };
         for tr in &self.wellknown_traits {
             match tr {
                 ZngurWellknownTraitData::Debug {
@@ -1317,7 +1326,7 @@ namespace rust {{
         Ok(())
     }
 
-    pub fn emit_links(&self, state: &mut EmitMode<impl Write>) -> std::fmt::Result {
+    pub fn emit_links(&self, state: &mut EmitMode<impl Write + HotReload>) -> std::fmt::Result {
         for method in &self.methods {
             method.sig.emit_link_decl(state)?;
         }
@@ -1326,8 +1335,8 @@ namespace rust {{
         }
         if let Some(cpp_value) = &self.cpp_value {
             match state {
-                EmitMode::Cpp(state, hotreload) => {
-                    if *hotreload {
+                EmitMode::Cpp(state) => {
+                    if state.hotreload().is_some() {
                         writeln!(state, "    ::rust::ZngurCppOpaqueOwnedObject* (*{})(uint8_t*);", cpp_value.0)?;
                     } else {
                         writeln!(state, "::rust::ZngurCppOpaqueOwnedObject* {}(uint8_t*);", cpp_value.0)?;
@@ -1358,8 +1367,8 @@ namespace rust {{
                     debug_print,
                 } => {
                     match state {
-                        EmitMode::Cpp(state, hotreload) => {
-                            if *hotreload {
+                        EmitMode::Cpp(state)=> {
+                            if state.hotreload().is_some() {
                                 writeln!(state, "    void (*{pretty_print})(uint8_t *data);")?;
                                 writeln!(state, "    void (*{debug_print})(uint8_t *data);")?;
                             } else {
@@ -1380,8 +1389,8 @@ namespace rust {{
                 ZngurWellknownTraitData::Unsized | ZngurWellknownTraitData::Copy => (),
                 ZngurWellknownTraitData::Drop { drop_in_place } => {
                     match state {
-                        EmitMode::Cpp(state, hotreload) => {
-                            if *hotreload {
+                        EmitMode::Cpp(state) => {
+                            if state.hotreload().is_some() {
                                 writeln!(state, "    void (*{drop_in_place})(uint8_t *data);")?;
                             } else {
                                 writeln!(state, "void {drop_in_place}(uint8_t *data);")?;
@@ -1437,24 +1446,24 @@ impl CppFile {
         state.text += r#"
 #define zngur_dbg(x) (::rust::zngur_dbg_impl(__FILE__, __LINE__, #x, x))"#;
 
-        state.text += if state.hotreload {
-            r#"
+       state.text += &if let Some(entry_point) = &state.hotreload {
+            format!(r#"
 #define INITIALIZE_ZNGUR_API(api_ptr) __zngur_init_api(api_ptr);
 #define ZNGUR_API_OK() __ZNGUR_RSAPI_INITIALIZED
 #define DECLARE_ZNGUR_API() \
     static bool __ZNGUR_RSAPI_INITIALIZED = false; \
     static ZngurRsApi __ZNGUR_RSAPI; \
-    ZngurRsApi& GetZngurRsApi() { assert(ZNGUR_API_OK()); return __ZNGUR_RSAPI; } \
+    ZngurRsApi& {entry_point}() {{ assert(ZNGUR_API_OK()); return __ZNGUR_RSAPI; }} \
     ZngurCApi __zngur_get_capi(); \
-    template<typename T> inline void __zngur_init_api(T api_ptr) { \
+    template<typename T> inline void __zngur_init_api(T api_ptr) {{ \
         auto get_rsapi_fn = (ZngurGetRsApiFn)api_ptr; \
-        if (get_rsapi_fn != nullptr) { \
+        if (get_rsapi_fn != nullptr) {{ \
             __ZNGUR_RSAPI = (*get_rsapi_fn)(__zngur_get_capi()); \
             __ZNGUR_RSAPI_INITIALIZED = true; \
-        } \
-    }"#
+       }} \
+    }}"#)
         } else {
-            ""
+            "".to_owned()
         };
         state.text += r#"
 template<typename T> struct _MISSING_TO_RUST_CONVERSION_TYPE_;
@@ -1626,7 +1635,7 @@ namespace rust {
         writeln!(state, "}}")?;
 
         // TODO: this section needs deduping, but c++ doesn't seem to mind
-        self.emit_links(&mut EmitMode::Cpp(state, state.hotreload))?;
+        self.emit_links(&mut EmitMode::Cpp(state))?;
         for td in &self.type_defs {
             td.ty.emit_header(state)?;
         }
@@ -1756,8 +1765,8 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         Ok(())
     }
 
-    fn emit_links(&self, state: &mut EmitMode<impl Write>) -> std::fmt::Result {
-        if state.hotreload() {
+    fn emit_links(&self, state: &mut EmitMode<impl Write + HotReload>) -> std::fmt::Result {
+        if state.hotreload().is_some() {
             writeln!(state, "struct ZngurRsApi {{")?;
         } else {
             writeln!(state, "extern \"C\" {{")?;
@@ -1771,7 +1780,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         for (_, td) in &self.trait_defs {
             td.emit_links(state)?;
         }
-        if state.hotreload() {
+        if let Some(entry_point) = state.hotreload().map(|s| s.to_owned()) {
             write!(state, "}};")?;
             write!(state, "\nstruct ZngurCApi {{")?;
             for func in &self.exported_fn_defs {
@@ -1787,7 +1796,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
                 }
             }
             write!(state, "\n}};")?;
-            write!(state, "\nZngurRsApi& GetZngurRsApi();")?;
+            write!(state, "\nZngurRsApi& {entry_point}();")?;
             write!(state, "\nZngurCApi __zngur_get_capi();")?;
             write!(state, "\ntypedef ZngurRsApi(*ZngurGetRsApiFn)(ZngurCApi);")?;
         } else {
@@ -1805,7 +1814,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         }
         for func in &self.exported_fn_defs {
             *is_really_needed = true;
-            func.sig.emit_link(&mut EmitMode::Cpp(state, state.hotreload), false)?;
+            func.sig.emit_link(&mut EmitMode::Cpp(state), false)?;
             writeln!(state, "{{")?;
             writeln!(
                 state,
@@ -1827,7 +1836,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         for imp in &self.exported_impls {
             *is_really_needed = true;
             for (name, sig) in &imp.methods {
-                sig.emit_link(&mut EmitMode::Cpp(state, state.hotreload), false)?;
+                sig.emit_link(&mut EmitMode::Cpp(state), false)?;
                 writeln!(state, "{{")?;
                 writeln!(
                     state,
@@ -1852,7 +1861,7 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
             }
         }
         writeln!(state, "}}")?;
-        if state.hotreload {
+        if state.hotreload.is_some() {
             *is_really_needed = true;
             writeln!(state, "")?;
             writeln!(state, "ZngurCApi __zngur_get_capi() {{")?;
@@ -1898,16 +1907,13 @@ template<typename T> inline typename FromRust<T&&>::type _FromRs(T&& t) {{ retur
         Ok(())
     }
 
-    pub fn render(self) -> (String, Option<String>) {
-        #[cfg(feature="hotreload")]
-        let hotreload = true;
-        #[cfg(not(feature="hotreload"))]
-        let hotreload = false;
+    pub fn render(self, entry_point: Option<&str>) -> (String, Option<String>) {
+        let hotreload = entry_point.map(|s| s.to_owned());
 
         let mut h_file = State {
             text: "".to_owned(),
             panic_to_exception: self.panic_to_exception,
-            hotreload,
+            hotreload: hotreload.clone(),
             indent_count: 0,
             disable_ending_newline: false,
         };
